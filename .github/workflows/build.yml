@@ -4,95 +4,53 @@ on:
   push:
     branches: [ "main" ]
     tags: [ "v*" ]
-  pull_request:
-    branches: [ "main" ]
   workflow_dispatch:
 
 jobs:
-  build-mac:
+  build:
     name: Build macOS .app
     runs-on: macos-latest
-
+    
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Swift
-        run: swift --version
-
-      - name: Build with SwiftPM
-        run: swift build -c release
-
-      - name: Package .app
-        run: |
-          # SPM executable -> .app bundle
-          APP_NAME="R2Drop"
-          BINARY=".build/release/${APP_NAME}"
-          
-          echo "Binary location: ${BINARY}"
-          ls -la "${BINARY}" 2>/dev/null || {
-            find .build -name "${APP_NAME}" -type f 2>/dev/null
-            exit 1
-          }
-          
-          # Create .app bundle structure
-          APP_DIR="${APP_NAME}.app"
-          mkdir -p "${APP_DIR}/Contents/MacOS"
-          mkdir -p "${APP_DIR}/Contents/Resources"
-          
-          cp "${BINARY}" "${APP_DIR}/Contents/MacOS/${APP_NAME}"
-          
-          # Create Info.plist
-          cat > "${APP_DIR}/Contents/Info.plist" <<'PLISTEND'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleExecutable</key>
-    <string>R2Drop</string>
-    <key>CFBundleIdentifier</key>
-    <string>app.r2drop</string>
-    <key>CFBundleName</key>
-    <string>R2Drop</string>
-    <key>CFBundleVersion</key>
-    <string>1.0.0</string>
-    <key>CFBundleShortVersionString</key>
-    <string>1.0.0</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>14.0</string>
-    <key>NSHighResolutionCapable</key>
-    <true/>
-</dict>
-</plist>
-PLISTEND
-          
-          codesign --force --deep --sign - "${APP_DIR}"
-          hdiutil create -volname "${APP_NAME}" -srcfolder "${APP_DIR}" \
-            -ov -format UDZO "${APP_NAME}-macOS.dmg"
-          echo "DMG created: ${APP_NAME}-macOS.dmg"
-
-      - name: Upload DMG
-        uses: actions/upload-artifact@v4
-        with:
-          name: R2Drop-macOS
-          path: R2Drop-macOS.dmg
-
-  release:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: build-mac
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: R2Drop-macOS
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: R2Drop-macOS.dmg
-          draft: true
-          generate_release_notes: true
+    - uses: actions/checkout@v4
+    
+    - name: Build
+      run: swift build -c release
+      
+    - name: Package DMG
+      run: |
+        APP=R2Drop
+        BIN=.build/release/$APP
+        test -f "$BIN" || exit 1
+        mkdir -p "$APP.app/Contents/MacOS"
+        cp "$BIN" "$APP.app/Contents/MacOS/$APP"
+        cat > "$APP.app/Contents/Info.plist" <<EOF
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+            <key>CFBundleExecutable</key>
+            <string>$APP</string>
+            <key>CFBundleIdentifier</key>
+            <string>app.r2drop</string>
+            <key>CFBundleName</key>
+            <string>R2Drop</string>
+            <key>CFBundleVersion</key>
+            <string>0.1.0</string>
+            <key>CFBundleShortVersionString</key>
+            <string>0.1.0</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>LSMinimumSystemVersion</key>
+            <string>14.0</string>
+        </dict>
+        </plist>
+        EOF
+        codesign --force --deep --sign - "$APP.app"
+        hdiutil create -volname "$APP" -srcfolder "$APP.app" -ov -format UDZO "$APP-macOS.dmg"
+        
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: R2Drop-macOS
+        path: R2Drop-macOS.dmg
