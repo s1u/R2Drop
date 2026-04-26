@@ -108,7 +108,17 @@ final class AppState: ObservableObject {
                     self?.transfers[idx].status = .uploading
                 }
             }
-            await updateTransfer(id: progress.id, status: .completed)
+
+            // Generate presigned URL for QR code
+            let fileName = url.lastPathComponent
+            let shareURL = try? await r2Service.generateShareURL(key: fileName, expiresIn: 3600)
+
+            await MainActor.run {
+                guard let idx = transfers.firstIndex(where: { $0.id == progress.id }) else { return }
+                transfers[idx].status = .completed
+                transfers[idx].shareURL = shareURL?.absoluteString
+            }
+
             await refreshFileList()
         } catch {
             await updateTransfer(id: progress.id, status: .failed(error.localizedDescription))

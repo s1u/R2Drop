@@ -8,6 +8,8 @@ struct TransferProgress: Identifiable {
     var bytesTransferred: Int64
     var status: TransferStatus
     let direction: TransferDirection
+    /// Presigned URL for sharing (set on upload completion)
+    var shareURL: String?
 
     var percentage: Double {
         guard fileSize > 0 else { return 0 }

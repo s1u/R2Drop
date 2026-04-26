@@ -1,5 +1,6 @@
 import SwiftUI
 import UniformTypeIdentifiers
+import AppKit
 
 struct MainView: View {
     @EnvironmentObject var appState: AppState
@@ -305,6 +306,7 @@ struct FileRow: View {
 
 struct TransferPanelView: View {
     @EnvironmentObject var appState: AppState
+    @State private var showQRCode: TransferProgress?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -312,6 +314,16 @@ struct TransferPanelView: View {
                 Text("传输队列")
                     .font(.headline)
                 Spacer()
+                Button("清除已完成") {
+                    appState.transfers.removeAll { t in
+                        if case .completed = t.status { return true }
+                        return false
+                    }
+                }
+                .buttonStyle(.plain)
+                .font(.caption)
+                .foregroundColor(.secondary)
+
                 Button("关闭") {
                     appState.showTransferPanel = false
                 }
@@ -327,17 +339,23 @@ struct TransferPanelView: View {
             ScrollView {
                 LazyVStack(spacing: 4) {
                     ForEach(appState.transfers) { transfer in
-                        TransferRow(transfer: transfer)
+                        TransferRow(transfer: transfer, showQR: $showQRCode)
                     }
                 }
                 .padding(8)
             }
+        }
+        // QR Code popover
+        .sheet(item: $showQRCode) { transfer in
+            QRCodePopoverView(transfer: transfer)
+                .environmentObject(appState)
         }
     }
 }
 
 struct TransferRow: View {
     let transfer: TransferProgress
+    @Binding var showQR: TransferProgress?
 
     var body: some View {
         HStack(spacing: 12) {
@@ -363,6 +381,20 @@ struct TransferRow: View {
                         .font(.caption2)
                         .foregroundColor(.secondary)
                     Spacer()
+
+                    // QR Code button (only for completed uploads)
+                    if transfer.direction == .upload,
+                       case .completed = transfer.status,
+                       transfer.shareURL != nil {
+                        Button(action: { showQR = transfer }) {
+                            Image(systemName: "qrcode")
+                                .font(.caption)
+                                .foregroundColor(.blue)
+                        }
+                        .buttonStyle(.plain)
+                        .help("显示二维码")
+                    }
+
                     if case .failed(let error) = transfer.status {
                         Text(error)
                             .font(.caption2)
@@ -382,6 +414,108 @@ struct TransferRow: View {
         case .uploading, .downloading: return .blue
         case .waiting: return .gray
         }
+    }
+}
+
+// MARK: - QR Code Popover
+
+struct QRCodePopoverView: View {
+    @EnvironmentObject var appState: AppState
+    let transfer: TransferProgress
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var qrImage: NSImage?
+    @State private var showCopyToast = false
+
+    var body: some View {
+        VStack(spacing: 16) {
+            HStack {
+                Text("分享文件")
+                    .font(.headline)
+                Spacer()
+                Button("关闭") { dismiss() }
+                    .buttonStyle(.plain)
+                    .font(.caption)
+            }
+
+            Text(transfer.fileName)
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+
+            if let qrImage {
+                Image(nsImage: qrImage)
+                    .resizable()
+                    .interpolation(.none)
+                    .frame(width: 200, height: 200)
+            } else {
+                ProgressView("生成二维码中...")
+                    .frame(width: 200, height: 200)
+            }
+
+            // Share URL (truncated)
+            if let url = transfer.shareURL {
+                HStack {
+                    Text(url)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+
+                    Button(action: {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(url, forType: .string)
+                        showCopyToast = true
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                            showCopyToast = false
+                        }
+                    }) {
+                        Image(systemName: showCopyToast ? "checkmark" : "doc.on.doc")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundColor(showCopyToast ? .green : .blue)
+                }
+                .padding(8)
+                .background(Color(NSColor.controlBackgroundColor))
+                .cornerRadius(6)
+            }
+
+            Text("链接有效期 1 小时，扫码或复制链接即可下载")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+
+            Button("拷贝链接并关闭") {
+                if let url = transfer.shareURL {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(url, forType: .string)
+                }
+                dismiss()
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+
+            if showCopyToast {
+                Text("已复制到剪贴板")
+                    .font(.caption)
+                    .foregroundColor(.green)
+                    .transition(.opacity)
+            }
+        }
+        .padding(20)
+        .frame(width: 320)
+        .onAppear {
+            generateQR()
+        }
+    }
+
+    private func generateQR() {
+        guard let urlString = transfer.shareURL else {
+            qrImage = QRCodeGenerator.generate(from: "No URL available")
+            return
+        }
+        qrImage = QRCodeGenerator.generate(from: urlString)
     }
 }
 

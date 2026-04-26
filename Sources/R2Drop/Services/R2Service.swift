@@ -2,11 +2,13 @@ import Foundation
 import AWSS3
 import AWSClientRuntime
 import Combine
+import CommonCrypto
 
 /// Main service for interacting with Cloudflare R2 (S3-compatible API)
 final actor R2Service {
     private var client: S3Client?
     private var config: R2Config?
+    private var rawCredentials: (accessKey: String, secretKey: String)?
 
     let progressSubject = PassthroughSubject<TransferProgress, Never>()
     let fileListSubject = PassthroughSubject<[R2File], Never>()
@@ -14,6 +16,7 @@ final actor R2Service {
     /// Connect to R2 with decrypted config
     func connect(config: R2Config) async throws {
         self.config = config
+        self.rawCredentials = (config.accessKeyId, config.secretAccessKey)
         let endpoint = config.endpoint
 
         let credentials = try AWSCredentialsProvider(
@@ -26,7 +29,6 @@ final actor R2Service {
             endpoint: endpoint,
             credentialsProvider: credentials,
             signingService: "s3",
-            // Force path-style addressing for R2 compatibility
             usePathStyle: true
         )
 
@@ -40,6 +42,7 @@ final actor R2Service {
     func disconnect() {
         client = nil
         config = nil
+        rawCredentials = nil
     }
 
     var isConnected: Bool { client != nil }
@@ -101,7 +104,13 @@ final actor R2Service {
         let key = fileURL.lastPathComponent
         let fileSize = Int64(fileData.count)
 
-        // Build the multipart upload input
+        // For files < 50MB, use single part upload
+        if fileSize < 50_000_000 {
+            try await singlePartUpload(key: key, data: fileData, progressHandler: progressHandler)
+            return
+        }
+
+        // Multipart upload for larger files
         let createInput = CreateMultipartUploadInput(
             bucket: config.bucket,
             key: key
@@ -112,13 +121,6 @@ final actor R2Service {
             throw R2Error.uploadFailed("Failed to get upload ID")
         }
 
-        // For files < 50MB, use single part upload
-        if fileSize < 50_000_000 {
-            try await singlePartUpload(key: key, data: fileData, progressHandler: progressHandler)
-            return
-        }
-
-        // Multipart upload for larger files
         let partSize: Int64 = 10_000_000 // 10MB per part
         var partNumber: Int32 = 1
         var completedParts: [S3ClientTypes.CompletedPart] = []
@@ -168,7 +170,6 @@ final actor R2Service {
                                   progressHandler: @escaping (Double) -> Void) async throws {
         guard let client, let config else { throw R2Error.notConnected }
 
-        // Simulate progress for single upload (send 100% at end)
         let input = PutObjectInput(
             body: .data(data),
             bucket: config.bucket,
@@ -182,10 +183,6 @@ final actor R2Service {
     // MARK: - Download
 
     /// Download a file from R2. Returns local temp URL.
-    /// - Parameters:
-    ///   - key: R2 object key
-    ///   - destination: Local file URL to write to
-    ///   - progressHandler: Progress callback (0-100)
     func download(key: String, destination: URL,
                   progressHandler: @escaping (Double) -> Void) async throws {
         guard let client, let config else { throw R2Error.notConnected }
@@ -201,7 +198,6 @@ final actor R2Service {
             throw R2Error.downloadFailed("Empty response body")
         }
 
-        // Stream data to file with progress
         var buffer = Data()
         for try await chunk in body {
             buffer.append(chunk)
@@ -228,11 +224,41 @@ final actor R2Service {
 
     // MARK: - Share (presigned URL)
 
-    /// Generate a presigned URL for sharing (valid for specified duration)
-    func generateShareURL(key: String, expiresIn: TimeInterval = 3600) throws -> URL {
-        // For now, return a placeholder. Full presigned URL generation
-        // requires additional AWS SDK setup
-        throw R2Error.featureNotImplemented
+    /// Generate a presigned URL for sharing using AWS SigV4.
+    /// Uses a pure Swift implementation compatible with Cloudflare R2.
+    /// The URL is valid for `expiresIn` seconds (default 1 hour).
+    func generateShareURL(key: String, expiresIn: TimeInterval = 3600) async throws -> URL {
+        guard let config, let creds = rawCredentials else { throw R2Error.notConnected }
+        guard !key.isEmpty else { throw R2Error.shareFailed("文件名为空") }
+
+        let signing = SigV4Signer(
+            accessKey: creds.accessKey,
+            secretKey: creds.secretKey,
+            region: config.region,
+            service: "s3"
+        )
+
+        let host = "\(config.bucket).\(config.accountId).r2.cloudflarestorage.com"
+        let path = "/\(key)"
+
+        return signing.presignURL(
+            method: "GET",
+            host: host,
+            path: path,
+            expires: Int(expiresIn)
+        )
+    }
+
+    /// Generate a simple public URL (no auth, only works if bucket is public)
+    func generatePublicURL(key: String) -> URL? {
+        guard let config else { return nil }
+        let encodedKey = key.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? key
+
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = "\(config.bucket).\(config.accountId).r2.cloudflarestorage.com"
+        components.path = "/\(encodedKey)"
+        return components.url
     }
 }
 
@@ -243,6 +269,7 @@ enum R2Error: Error, LocalizedError {
     case uploadFailed(String)
     case downloadFailed(String)
     case deleteFailed(String)
+    case shareFailed(String)
     case featureNotImplemented
 
     var errorDescription: String? {
@@ -251,6 +278,7 @@ enum R2Error: Error, LocalizedError {
         case .uploadFailed(let msg): return "上传失败: \(msg)"
         case .downloadFailed(let msg): return "下载失败: \(msg)"
         case .deleteFailed(let msg): return "删除失败: \(msg)"
+        case .shareFailed(let msg): return "分享失败: \(msg)"
         case .featureNotImplemented: return "该功能尚未实现"
         }
     }
