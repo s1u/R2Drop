@@ -36,7 +36,9 @@ enum DragDropHandler {
     static func beginDragOut(from sourceURL: URL, in view: NSView) {
         let draggingItem = NSDraggingItem(pasteboardWriter: sourceURL as NSURL)
         draggingItem.setDraggingFrame(view.bounds, contents: nil)
-        view.beginDraggingSession(with: [draggingItem], event: NSApp.currentEvent!, source: view as? NSDraggingSource)
+        if let event = NSApp.currentEvent {
+            view.beginDraggingSession(with: [draggingItem], event: event, source: view)
+        }
     }
 
     /// Register the view for file drop (upload)

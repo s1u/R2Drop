@@ -6,7 +6,7 @@ enum FileHelper {
 
     /// Get the default downloads directory
     static var downloadsDirectory: URL {
-        FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!
+        FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
             ?? FileManager.default.temporaryDirectory
     }
 
