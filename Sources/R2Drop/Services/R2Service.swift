@@ -3,6 +3,7 @@ import AWSS3
 import AWSClientRuntime
 import Combine
 import SmithyIdentity
+import Smithy
 
 /// Main service for interacting with Cloudflare R2 (S3-compatible API)
 final actor R2Service {
@@ -16,18 +17,19 @@ final actor R2Service {
     func connect(config: R2Config) async throws {
         self.config = config
 
+        // Use the simpler client init with a custom configuration
         let credentials = AWSCredentialIdentity(
             accessKey: config.accessKeyId,
             secret: config.secretAccessKey
         )
         let resolver = try StaticAWSCredentialIdentityResolver(credentials)
 
+        // Build S3 config step by step
         let s3Config = try await S3Client.S3ClientConfiguration(
             awsCredentialIdentityResolver: resolver,
             region: config.region,
             endpoint: config.endpoint,
-            forcePathStyle: true,
-            signingService: "s3"
+            forcePathStyle: true
         )
 
         client = S3Client(config: s3Config)
@@ -53,7 +55,7 @@ final actor R2Service {
         let input = ListObjectsV2Input(
             bucket: config.bucket,
             continuationToken: continuationToken,
-            maxKeys: maxKeys,
+            maxKeys: Int64(maxKeys),
             prefix: prefix
         )
 
@@ -101,7 +103,7 @@ final actor R2Service {
 
         let fileData = try Data(contentsOf: fileURL)
         let key = fileURL.lastPathComponent
-        let fileSize = fileData.count
+        let fileSize = Int64(fileData.count)
 
         // Single part upload for files < 50MB
         if fileSize < 50_000_000 {
@@ -125,16 +127,16 @@ final actor R2Service {
             throw R2Error.uploadFailed("无法获取 Upload ID")
         }
 
-        let partSize = 10 * 1024 * 1024 // 10MB
+        let partSize = 10_485_760 // 10MB
         var completedParts: [S3ClientTypes.CompletedPart] = []
         var partNumber: Int = 1
-        var bytesUploaded: Int = 0
+        var bytesUploaded: Int64 = 0
 
-        var offset = 0
+        var offset: Int64 = 0
         while offset < fileSize {
-            let chunkSize = min(partSize, fileSize - offset)
-            let end = offset + chunkSize
-            let chunk = Data(fileData[offset..<end])
+            let chunkEnd = min(offset + Int64(partSize), fileSize)
+            let chunkRange = Int(offset)..<Int(chunkEnd)
+            let chunk = Data(fileData[chunkRange])
 
             let uploadPartInput = UploadPartInput(
                 body: .data(chunk),
@@ -153,10 +155,10 @@ final actor R2Service {
                 partNumber: partNumber
             ))
 
-            bytesUploaded += chunkSize
+            bytesUploaded += chunkEnd - offset
             progressHandler(Double(bytesUploaded) / Double(fileSize) * 100)
             partNumber += 1
-            offset += chunkSize
+            offset = chunkEnd
         }
 
         let completeInput = CompleteMultipartUploadInput(
@@ -191,7 +193,7 @@ final actor R2Service {
         case .stream(let stream):
             data = try await stream.readToEndAsync() ?? Data()
         case .noStream:
-            throw R2Error.downloadFailed("无数据流")
+            data = Data()
         }
 
         try data.write(to: destination, options: .atomic)
