@@ -68,7 +68,7 @@ final actor R2Service {
             guard let key = obj.key, let lastMod = obj.lastModified else { continue }
             let file = R2File(
                 key: key,
-                size: obj.size ?? Int64(0),
+                size: obj.size.map(Int64.init) ?? Int64(0),
                 lastModified: lastMod,
                 etag: obj.eTag ?? ""
             )
