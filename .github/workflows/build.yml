@@ -11,15 +11,13 @@ on:
 jobs:
   build-mac:
     name: Build macOS .app
-    runs-on: macos-15
+    runs-on: macos-latest
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Select Xcode
-        run: |
-          ls /Applications/ | grep Xcode || true
-          sudo xcode-select -s /Applications/Xcode_16.app/Contents/Developer 2>/dev/null || true
+      - name: Setup Swift
+        run: swift --version
 
       - name: Build with SwiftPM
         run: swift build -c release
