@@ -194,6 +194,9 @@ struct FileRow: View {
     @Binding var selectedFile: R2File?
     @State private var isDragging = false
     @State private var isDownloading = false
+    @State private var shareURL: String?
+    @State private var isGeneratingQR = false
+    @State private var showQRCode = false
 
     var isSelected: Bool { selectedFile?.id == file.id }
 
@@ -224,12 +227,27 @@ struct FileRow: View {
             Spacer()
 
             // Action buttons
-            HStack(spacing: 8) {
+            HStack(spacing: 6) {
                 if isDownloading {
                     ProgressView()
                         .scaleEffect(0.7)
                         .frame(width: 20)
                 }
+
+                // QR Code button
+                Button(action: shareFile) {
+                    if isGeneratingQR {
+                        ProgressView()
+                            .scaleEffect(0.6)
+                            .frame(width: 16, height: 16)
+                    } else {
+                        Image(systemName: "qrcode")
+                            .foregroundColor(.blue)
+                    }
+                }
+                .buttonStyle(.plain)
+                .help("分享二维码")
+                .disabled(isGeneratingQR)
 
                 Button(action: downloadFile) {
                     Image(systemName: "arrow.down.circle")
@@ -262,8 +280,6 @@ struct FileRow: View {
         )
         // Drag out to download
         .onDrag {
-            // For small files, we start download immediately
-            // The NSItemProvider will trigger a callback
             isDownloading = true
             Task {
                 let dest = FileHelper.uniqueDownloadURL(for: file.fileName)
@@ -271,6 +287,12 @@ struct FileRow: View {
                 await MainActor.run { isDownloading = false }
             }
             return NSItemProvider(object: file.fileName as NSString)
+        }
+        // QR code sheet
+        .sheet(isPresented: $showQRCode) {
+            if let url = shareURL {
+                FileQRCodeView(fileName: file.fileName, shareURL: url)
+            }
         }
     }
 
@@ -285,6 +307,24 @@ struct FileRow: View {
         case .archive: return .orange
         case .document: return .blue
         case .other: return .gray
+        }
+    }
+
+    private func shareFile() {
+        isGeneratingQR = true
+        Task {
+            do {
+                let url = try await appState.r2Service.generateShareURL(key: file.key, expiresIn: 3600)
+                await MainActor.run {
+                    shareURL = url.absoluteString
+                    isGeneratingQR = false
+                    showQRCode = true
+                }
+            } catch {
+                await MainActor.run {
+                    isGeneratingQR = false
+                }
+            }
         }
     }
 
@@ -518,6 +558,98 @@ struct QRCodePopoverView: View {
         qrImage = QRCodeGenerator.generate(from: urlString)
     }
 }
+
+// MARK: - File QR Code View (from file list)
+
+/// QR code popover for existing files in the file list
+struct FileQRCodeView: View {
+    let fileName: String
+    let shareURL: String
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var qrImage: NSImage?
+    @State private var showCopyToast = false
+
+    var body: some View {
+        VStack(spacing: 16) {
+            HStack {
+                Text("分享文件")
+                    .font(.headline)
+                Spacer()
+                Button("关闭") { dismiss() }
+                    .buttonStyle(.plain)
+                    .font(.caption)
+            }
+
+            Text(fileName)
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+
+            if let qrImage {
+                Image(nsImage: qrImage)
+                    .resizable()
+                    .interpolation(.none)
+                    .frame(width: 200, height: 200)
+            } else {
+                ProgressView("生成二维码中...")
+                    .frame(width: 200, height: 200)
+            }
+
+            // Share URL
+            HStack {
+                Text(shareURL)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+
+                Button(action: {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(shareURL, forType: .string)
+                    showCopyToast = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                        showCopyToast = false
+                    }
+                }) {
+                    Image(systemName: showCopyToast ? "checkmark" : "doc.on.doc")
+                        .font(.caption)
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(showCopyToast ? .green : .blue)
+            }
+            .padding(8)
+            .background(Color(NSColor.controlBackgroundColor))
+            .cornerRadius(6)
+
+            Text("链接有效期 1 小时，扫码或复制链接即可下载")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+
+            Button("复制链接并关闭") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(shareURL, forType: .string)
+                dismiss()
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+
+            if showCopyToast {
+                Text("已复制到剪贴板")
+                    .font(.caption)
+                    .foregroundColor(.green)
+                    .transition(.opacity)
+            }
+        }
+        .padding(20)
+        .frame(width: 320)
+        .onAppear {
+            qrImage = QRCodeGenerator.generate(from: shareURL)
+        }
+    }
+}
+
 
 // MARK: - Date Formatting
 
