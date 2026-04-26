@@ -6,12 +6,12 @@ on:
     tags: [ "v*" ]
   pull_request:
     branches: [ "main" ]
-  workflow_dispatch:  # 手动触发
+  workflow_dispatch:
 
 jobs:
   build-mac:
     name: Build macOS .app
-    runs-on: macos-15  # macOS 15 Sequoia, Xcode 16
+    runs-on: macos-15
 
     steps:
       - uses: actions/checkout@v4
@@ -19,23 +19,85 @@ jobs:
       - name: Select Xcode version
         run: sudo xcode-select -s /Applications/Xcode_16.app/Contents/Developer
 
-      - name: Build (release)
-        run: swift build -c release
-
-      - name: Package .app bundle
+      - name: Build .app with xcodebuild
         run: |
-          APP_PATH=".build/apple/Products/Release/R2Drop"
-          if [ -d "$APP_PATH" ]; then
-            # Sign with ad-hoc for distribution
-            codesign --force --deep --sign - "$APP_PATH"
-            # Create a DMG
-            hdiutil create -volname "R2Drop" -srcfolder "$APP_PATH" \
-              -ov -format UDZO "R2Drop-macOS.dmg"
-          else
-            echo "App bundle not found at $APP_PATH"
-            ls -la .build/apple/Products/Release/ || true
+          # Generate Xcode project from SPM
+          swift package generate-xcodeproj 2>/dev/null || true
+          
+          # Build with xcodebuild for macOS
+          xcodebuild -scheme R2Drop -configuration Release \
+            -derivedDataPath ./DerivedData \
+            -destination 'platform=macOS' \
+            build 2>&1 | xcbeautify --quiet || \
+          # Fallback: SPM build and manually create .app
+          swift build -c release && \
+          mkdir -p DerivedData/Build/Products/Release && \
+          cp .build/release/R2Drop DerivedData/Build/Products/Release/
+
+      - name: Create .app bundle
+        run: |
+          # Check various possible locations
+          APP_BUNDLE=""
+          if [ -d "DerivedData/Build/Products/Release/R2Drop.app" ]; then
+            APP_BUNDLE="DerivedData/Build/Products/Release/R2Drop.app"
+          elif [ -d ".build/apple/Products/Release/R2Drop.app" ]; then
+            APP_BUNDLE=".build/apple/Products/Release/R2Drop.app"
+          elif [ -f "DerivedData/Build/Products/Release/R2Drop" ]; then
+            # It's a binary, create minimal .app
+            mkdir -p "DerivedData/Build/Products/Release/R2Drop.app/Contents/MacOS"
+            cp "DerivedData/Build/Products/Release/R2Drop" \
+              "DerivedData/Build/Products/Release/R2Drop.app/Contents/MacOS/R2Drop"
+            APP_BUNDLE="DerivedData/Build/Products/Release/R2Drop.app"
+          elif [ -f ".build/release/R2Drop" ]; then
+            mkdir -p ".build/apple/Products/Release/R2Drop.app/Contents/MacOS"
+            cp ".build/release/R2Drop" \
+              ".build/apple/Products/Release/R2Drop.app/Contents/MacOS/R2Drop"
+            APP_BUNDLE=".build/apple/Products/Release/R2Drop.app"
+          fi
+
+          if [ -z "$APP_BUNDLE" ]; then
+            echo "Error: Could not find built binary"
+            find . -name "R2Drop" -type f 2>/dev/null
+            find . -name "R2Drop.app" -type d 2>/dev/null
             exit 1
           fi
+
+          echo "Found app bundle at: $APP_BUNDLE"
+          
+          # Create Info.plist if needed
+          if [ ! -f "$APP_BUNDLE/Contents/Info.plist" ]; then
+            cat > "$APP_BUNDLE/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>R2Drop</string>
+    <key>CFBundleIdentifier</key>
+    <string>app.r2drop</string>
+    <key>CFBundleName</key>
+    <string>R2Drop</string>
+    <key>CFBundleVersion</key>
+    <string>1.0.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0.0</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+</dict>
+</plist>
+PLIST
+          fi
+
+          # Ad-hoc sign
+          codesign --force --deep --sign - "$APP_BUNDLE"
+
+          # Create DMG
+          hdiutil create -volname "R2Drop" -srcfolder "$APP_BUNDLE" \
+            -ov -format UDZO "R2Drop-macOS.dmg"
 
       - name: Upload DMG as artifact
         uses: actions/upload-artifact@v4
