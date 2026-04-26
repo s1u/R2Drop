@@ -28,8 +28,8 @@ final actor R2Service {
         let s3Config = try await S3Client.S3ClientConfiguration(
             awsCredentialIdentityResolver: resolver,
             region: config.region,
-            endpoint: config.endpoint,
-            forcePathStyle: true
+            forcePathStyle: true,
+            endpoint: config.endpoint
         )
 
         client = S3Client(config: s3Config)
@@ -55,7 +55,7 @@ final actor R2Service {
         let input = ListObjectsV2Input(
             bucket: config.bucket,
             continuationToken: continuationToken,
-            maxKeys: Int64(maxKeys),
+            maxKeys: Int(maxKeys),
             prefix: prefix
         )
 
