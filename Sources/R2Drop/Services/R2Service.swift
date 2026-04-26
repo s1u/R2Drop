@@ -2,12 +2,12 @@ import Foundation
 import AWSS3
 import AWSClientRuntime
 import Combine
+import SmithyIdentity
 
 /// Main service for interacting with Cloudflare R2 (S3-compatible API)
 final actor R2Service {
     private var client: S3Client?
     private var config: R2Config?
-    private var s3Config: S3Client.S3ClientConfiguration?
 
     let progressSubject = PassthroughSubject<TransferProgress, Never>()
     let fileListSubject = PassthroughSubject<[R2File], Never>()
@@ -15,15 +15,20 @@ final actor R2Service {
     /// Connect to R2 with decrypted config
     func connect(config: R2Config) async throws {
         self.config = config
-        let endpoint = config.endpoint
+
+        let credentials = AWSCredentialIdentity(
+            accessKey: config.accessKeyId,
+            secret: config.secretAccessKey
+        )
+        let resolver = try StaticAWSCredentialIdentityResolver(credentials)
 
         let s3Config = try await S3Client.S3ClientConfiguration(
+            awsCredentialIdentityResolver: resolver,
             region: config.region,
-            endpoint: endpoint,
-            signingService: "s3",
-            usePathStyle: true
+            endpoint: config.endpoint,
+            forcePathStyle: true,
+            signingService: "s3"
         )
-        self.s3Config = s3Config
 
         client = S3Client(config: s3Config)
 
@@ -35,7 +40,6 @@ final actor R2Service {
     func disconnect() {
         client = nil
         config = nil
-        s3Config = nil
     }
 
     var isConnected: Bool { client != nil }
@@ -55,7 +59,6 @@ final actor R2Service {
 
         let output = try await client.listObjectsV2(input: input)
 
-        // S3 SDK returns contents as [S3ClientTypes.Object]?
         let contents = output.contents ?? []
         var files: [R2File] = []
 
@@ -98,7 +101,7 @@ final actor R2Service {
 
         let fileData = try Data(contentsOf: fileURL)
         let key = fileURL.lastPathComponent
-        let fileSize = Int64(fileData.count)
+        let fileSize = fileData.count
 
         // Single part upload for files < 50MB
         if fileSize < 50_000_000 {
@@ -112,7 +115,7 @@ final actor R2Service {
             return
         }
 
-        // Multipart upload for larger files
+        // Multipart upload
         let createInput = CreateMultipartUploadInput(
             bucket: config.bucket,
             key: key
@@ -122,15 +125,16 @@ final actor R2Service {
             throw R2Error.uploadFailed("无法获取 Upload ID")
         }
 
-        let partSize = 10 * 1024 * 1024 // 10MB per part
+        let partSize = 10 * 1024 * 1024 // 10MB
         var completedParts: [S3ClientTypes.CompletedPart] = []
         var partNumber: Int = 1
-        var bytesUploaded: Int64 = 0
+        var bytesUploaded: Int = 0
 
         var offset = 0
-        while offset < fileData.count {
-            let chunkSize = min(partSize, fileData.count - offset)
-            let chunk = fileData[offset..<offset + chunkSize]
+        while offset < fileSize {
+            let chunkSize = min(partSize, fileSize - offset)
+            let end = offset + chunkSize
+            let chunk = Data(fileData[offset..<end])
 
             let uploadPartInput = UploadPartInput(
                 body: .data(chunk),
@@ -149,7 +153,7 @@ final actor R2Service {
                 partNumber: partNumber
             ))
 
-            bytesUploaded += Int64(chunkSize)
+            bytesUploaded += chunkSize
             progressHandler(Double(bytesUploaded) / Double(fileSize) * 100)
             partNumber += 1
             offset += chunkSize
@@ -177,8 +181,19 @@ final actor R2Service {
             throw R2Error.downloadFailed("服务器返回空数据")
         }
 
-        // ByteStream provides data directly
-        let data = try await body.readData()
+        let data: Data
+        switch body {
+        case .data(let optionalData):
+            guard let d = optionalData else {
+                throw R2Error.downloadFailed("返回数据为空")
+            }
+            data = d
+        case .stream(let stream):
+            data = try await stream.readToEndAsync() ?? Data()
+        case .noStream:
+            throw R2Error.downloadFailed("无数据流")
+        }
+
         try data.write(to: destination, options: .atomic)
         progressHandler(100)
     }
@@ -194,7 +209,6 @@ final actor R2Service {
 
     // MARK: - Share (presigned URL)
 
-    /// Generate a presigned URL for sharing using AWS SigV4.
     func generateShareURL(key: String, expiresIn: TimeInterval = 3600) async throws -> URL {
         guard let config else { throw R2Error.notConnected }
         guard !key.isEmpty else { throw R2Error.shareFailed("文件名为空") }
@@ -215,19 +229,6 @@ final actor R2Service {
             path: path,
             expires: Int(expiresIn)
         )
-    }
-}
-
-// MARK: - ByteStream async read
-
-extension ByteStream {
-    /// Read all data from the stream
-    func readData() async throws -> Data {
-        var result = Data()
-        for try await chunk in self {
-            result.append(chunk)
-        }
-        return result
     }
 }
 
