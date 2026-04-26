@@ -24,8 +24,6 @@ final class AppState: ObservableObject {
     let cryptoService = CryptoService()
     let r2Service = R2Service()
 
-    private var cancellables = Set<AnyCancellable>()
-
     init() {
         hasCredentials = cryptoService.hasStoredCredentials
     }
@@ -38,7 +36,6 @@ final class AppState: ObservableObject {
             try await r2Service.connect(config: config)
             isUnlocked = true
             loginError = nil
-            // Load files immediately
             await refreshFileList()
         } catch {
             loginError = error.localizedDescription
@@ -60,6 +57,10 @@ final class AppState: ObservableObject {
 
     func lock() {
         isUnlocked = false
+        files = []
+        searchQuery = ""
+        transfers = []
+        showTransferPanel = false
         Task { await r2Service.disconnect() }
     }
 
@@ -70,7 +71,7 @@ final class AppState: ObservableObject {
         fileListError = nil
         do {
             let allFiles = try await r2Service.listAllFiles()
-            files = allFiles.sorted { $0.lastModified > $1.lastModified }
+            files = allFiles
         } catch {
             fileListError = error.localizedDescription
         }
@@ -85,72 +86,86 @@ final class AppState: ObservableObject {
     // MARK: - Transfer Actions
 
     func uploadFile(url: URL) async {
-        let progress = TransferProgress(
-            fileName: url.lastPathComponent,
-            fileSize: (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? 0,
-            bytesTransferred: 0,
-            status: .waiting,
-            direction: .upload
-        )
+        let fileSize = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? 0
+        let progressId = UUID()
+        let fileName = url.lastPathComponent
 
-        // Simulate initial progress
+        // Add initial progress entry
         await MainActor.run {
+            let progress = TransferProgress(
+                id: progressId,
+                fileName: fileName,
+                fileSize: fileSize,
+                bytesTransferred: 0,
+                status: .waiting,
+                direction: .upload,
+                shareURL: nil
+            )
             transfers.append(progress)
             showTransferPanel = true
         }
 
+        await updateTransferStatus(id: progressId, status: .uploading)
+
         do {
-            await updateTransfer(id: progress.id, status: .uploading)
-            try await r2Service.upload(fileURL: url) { [weak self] pct in
-                Task { @MainActor in
-                    guard let idx = self?.transfers.firstIndex(where: { $0.id == progress.id }) else { return }
-                    self?.transfers[idx].bytesTransferred = Int64(Double(progress.fileSize) * pct / 100.0)
-                    self?.transfers[idx].status = .uploading
+            try await r2Service.upload(fileURL: url) { [weak self, progressId, fileSize] pct in
+                Task { @MainActor [weak self] in
+                    guard let self, let idx = self.transfers.firstIndex(where: { $0.id == progressId }) else { return }
+                    self.transfers[idx].bytesTransferred = Int64(Double(fileSize) * pct / 100.0)
+                    self.transfers[idx].status = .uploading
                 }
             }
 
             // Generate presigned URL for QR code
-            let fileName = url.lastPathComponent
             let shareURL = try? await r2Service.generateShareURL(key: fileName, expiresIn: 3600)
 
             await MainActor.run {
-                guard let idx = transfers.firstIndex(where: { $0.id == progress.id }) else { return }
+                guard let idx = transfers.firstIndex(where: { $0.id == progressId }) else { return }
                 transfers[idx].status = .completed
                 transfers[idx].shareURL = shareURL?.absoluteString
             }
 
             await refreshFileList()
         } catch {
-            await updateTransfer(id: progress.id, status: .failed(error.localizedDescription))
+            await updateTransferStatus(id: progressId, status: .failed(error.localizedDescription))
         }
     }
 
     func downloadFile(file: R2File, to destination: URL) async {
-        let progress = TransferProgress(
-            fileName: file.fileName,
-            fileSize: file.size,
-            bytesTransferred: 0,
-            status: .waiting,
-            direction: .download
-        )
+        let progressId = UUID()
 
         await MainActor.run {
+            let progress = TransferProgress(
+                id: progressId,
+                fileName: file.fileName,
+                fileSize: file.size,
+                bytesTransferred: 0,
+                status: .waiting,
+                direction: .download,
+                shareURL: nil
+            )
             transfers.append(progress)
             showTransferPanel = true
         }
 
+        await updateTransferStatus(id: progressId, status: .downloading)
+
         do {
-            await updateTransfer(id: progress.id, status: .downloading)
-            try await r2Service.download(key: file.key, destination: destination) { [weak self] pct in
+            try await r2Service.download(key: file.key, destination: destination) { [progressId, fileSize = file.size] pct in
                 Task { @MainActor in
-                    guard let idx = self?.transfers.firstIndex(where: { $0.id == progress.id }) else { return }
-                    self?.transfers[idx].bytesTransferred = Int64(Double(file.size) * pct / 100.0)
-                    self?.transfers[idx].status = .downloading
+                    guard let idx = self.transfers.firstIndex(where: { $0.id == progressId }) else { return }
+                    self.transfers[idx].bytesTransferred = Int64(Double(fileSize) * pct / 100.0)
+                    self.transfers[idx].status = .downloading
                 }
             }
-            await updateTransfer(id: progress.id, status: .completed)
+            await updateTransferStatus(id: progressId, status: .completed)
+
+            // Reveal in Finder
+            await MainActor.run {
+                NSWorkspace.shared.activateFileViewerSelecting([destination])
+            }
         } catch {
-            await updateTransfer(id: progress.id, status: .failed(error.localizedDescription))
+            await updateTransferStatus(id: progressId, status: .failed(error.localizedDescription))
         }
     }
 
@@ -166,7 +181,7 @@ final class AppState: ObservableObject {
     // MARK: - Private
 
     @MainActor
-    private func updateTransfer(id: UUID, status: TransferStatus) {
+    private func updateTransferStatus(id: UUID, status: TransferStatus) {
         guard let idx = transfers.firstIndex(where: { $0.id == id }) else { return }
         transfers[idx].status = status
     }

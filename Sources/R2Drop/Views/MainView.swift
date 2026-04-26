@@ -279,6 +279,7 @@ struct FileRow: View {
                 .fill(isSelected ? Color.blue.opacity(0.08) : Color.clear)
         )
         // Drag out to download
+        // Note: .onDrag is synchronous - we trigger download and provide file name
         .onDrag {
             isDownloading = true
             Task {
@@ -286,7 +287,9 @@ struct FileRow: View {
                 await appState.downloadFile(file: file, to: dest)
                 await MainActor.run { isDownloading = false }
             }
-            return NSItemProvider(object: file.fileName as NSString)
+            // Provide a placeholder promise; the real file will be in the download folder
+            let provider = NSItemProvider(object: "\(file.fileName) (下载完成后可在下载文件夹查看)" as NSString)
+            return provider
         }
         // QR code sheet
         .sheet(isPresented: $showQRCode) {

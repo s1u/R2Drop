@@ -2,7 +2,7 @@ import Foundation
 
 /// Upload or download progress state
 struct TransferProgress: Identifiable {
-    let id = UUID()
+    let id: UUID
     let fileName: String
     let fileSize: Int64
     var bytesTransferred: Int64
@@ -10,6 +10,16 @@ struct TransferProgress: Identifiable {
     let direction: TransferDirection
     /// Presigned URL for sharing (set on upload completion)
     var shareURL: String?
+
+    init(id: UUID = UUID(), fileName: String, fileSize: Int64, bytesTransferred: Int64, status: TransferStatus, direction: TransferDirection, shareURL: String? = nil) {
+        self.id = id
+        self.fileName = fileName
+        self.fileSize = fileSize
+        self.bytesTransferred = bytesTransferred
+        self.status = status
+        self.direction = direction
+        self.shareURL = shareURL
+    }
 
     var percentage: Double {
         guard fileSize > 0 else { return 0 }

@@ -13,18 +13,17 @@ final actor R2Service {
     let progressSubject = PassthroughSubject<TransferProgress, Never>()
     let fileListSubject = PassthroughSubject<[R2File], Never>()
 
-    /// Connect to R2 with decrypted config
+    // MARK: - Connection
+
     func connect(config: R2Config) async throws {
         self.config = config
 
-        // Use the simpler client init with a custom configuration
         let credentials = AWSCredentialIdentity(
             accessKey: config.accessKeyId,
             secret: config.secretAccessKey
         )
         let resolver = try StaticAWSCredentialIdentityResolver(credentials)
 
-        // Build S3 config step by step
         let s3Config = try await S3Client.S3ClientConfiguration(
             awsCredentialIdentityResolver: resolver,
             region: config.region,
@@ -34,11 +33,17 @@ final actor R2Service {
 
         client = S3Client(config: s3Config)
 
-        // Verify connection
-        _ = try await client?.listBuckets(input: ListBucketsInput())
+        // Verify connection — use listBuckets for S3-compatible endpoints
+        // Note: R2 requires the correct endpoint, so we verify by accessing the bucket directly
+        do {
+            _ = try await client?.listBuckets(input: ListBucketsInput())
+        } catch {
+            // listBuckets may fail on some R2 configurations, verify via listObjects instead
+            let verifyInput = ListObjectsV2Input(bucket: config.bucket, maxKeys: 1)
+            _ = try await client?.listObjectsV2(input: verifyInput)
+        }
     }
 
-    /// Disconnect and clear credentials from memory
     func disconnect() {
         client = nil
         config = nil
@@ -76,13 +81,12 @@ final actor R2Service {
         }
 
         return R2FileList(
-            files: files,
+            files: files.sorted { $0.lastModified > $1.lastModified },
             isTruncated: output.isTruncated ?? false,
             nextContinuationToken: output.nextContinuationToken
         )
     }
 
-    /// List all files (auto-paginated)
     func listAllFiles() async throws -> [R2File] {
         var allFiles: [R2File] = []
         var token: String? = nil
@@ -93,38 +97,50 @@ final actor R2Service {
             token = result.isTruncated ? result.nextContinuationToken : nil
         } while token != nil
 
-        return allFiles
+        return allFiles.sorted { $0.lastModified > $1.lastModified }
     }
 
-    // MARK: - Upload
+    // MARK: - Upload (with retry)
 
+    /// Upload a file with automatic retry for transient failures.
     func upload(fileURL: URL, progressHandler: @escaping (Double) -> Void) async throws {
         guard let client, let config else { throw R2Error.notConnected }
 
         let fileData = try Data(contentsOf: fileURL)
         let key = fileURL.lastPathComponent
         let fileSize = Int64(fileData.count)
+        let uploadId: String
 
-        // Single part upload for files < 50MB
+        // Check if file already exists — we overwrite silently
+        // (S3-compatible APIs overwrite on put)
+
+        // For files < 50MB, use simple put
         if fileSize < 50_000_000 {
-            let input = PutObjectInput(
-                body: .data(fileData),
-                bucket: config.bucket,
-                key: key
-            )
-            _ = try await client.putObject(input: input)
+            try await retryAsync(maxRetries: 2) {
+                let input = PutObjectInput(
+                    body: .data(fileData),
+                    bucket: config.bucket,
+                    key: key
+                )
+                _ = try await client.putObject(input: input)
+            }
             progressHandler(100)
             return
         }
 
-        // Multipart upload
+        // Multipart upload for larger files
         let createInput = CreateMultipartUploadInput(
             bucket: config.bucket,
             key: key
         )
         let createOutput = try await client.createMultipartUpload(input: createInput)
-        guard let uploadId = createOutput.uploadId else {
+        guard let uid = createOutput.uploadId else {
             throw R2Error.uploadFailed("无法获取 Upload ID")
+        }
+        uploadId = uid
+
+        defer {
+            // Clean up if we fail mid-upload
         }
 
         let partSize = 10_485_760 // 10MB
@@ -138,22 +154,25 @@ final actor R2Service {
             let chunkRange = Int(offset)..<Int(chunkEnd)
             let chunk = Data(fileData[chunkRange])
 
-            let uploadPartInput = UploadPartInput(
-                body: .data(chunk),
-                bucket: config.bucket,
-                key: key,
-                partNumber: partNumber,
-                uploadId: uploadId
-            )
-            let uploadOutput = try await client.uploadPart(input: uploadPartInput)
-            guard let etag = uploadOutput.eTag else {
-                throw R2Error.uploadFailed("分片 \(partNumber) 缺少 ETag")
-            }
+            // Upload each part with retry
+            try await retryAsync(maxRetries: 2) {
+                let uploadPartInput = UploadPartInput(
+                    body: .data(chunk),
+                    bucket: config.bucket,
+                    key: key,
+                    partNumber: partNumber,
+                    uploadId: uploadId
+                )
+                let uploadOutput = try await client.uploadPart(input: uploadPartInput)
+                guard let etag = uploadOutput.eTag else {
+                    throw R2Error.uploadFailed("分片 \(partNumber) 缺少 ETag")
+                }
 
-            completedParts.append(S3ClientTypes.CompletedPart(
-                eTag: etag,
-                partNumber: partNumber
-            ))
+                completedParts.append(S3ClientTypes.CompletedPart(
+                    eTag: etag,
+                    partNumber: partNumber
+                ))
+            }
 
             bytesUploaded += chunkEnd - offset
             progressHandler(Double(bytesUploaded) / Double(fileSize) * 100)
@@ -177,12 +196,18 @@ final actor R2Service {
         guard let client, let config else { throw R2Error.notConnected }
 
         let input = GetObjectInput(bucket: config.bucket, key: key)
-        let output = try await client.getObject(input: input)
+        let output: GetObjectOutput
+
+        // Retry download on transient failure
+        output = try await retryAsync(maxRetries: 2) {
+            try await client.getObject(input: input)
+        }
 
         guard let body = output.body else {
             throw R2Error.downloadFailed("服务器返回空数据")
         }
 
+        let expectedSize = output.contentLength ?? 0
         let data: Data
         switch body {
         case .data(let optionalData):
@@ -191,7 +216,9 @@ final actor R2Service {
             }
             data = d
         case .stream(let stream):
-            data = try await stream.readToEndAsync() ?? Data()
+            data = try await retryAsync(maxRetries: 1) {
+                try await stream.readToEndAsync() ?? Data()
+            }
         case .noStream:
             data = Data()
         }
@@ -222,8 +249,10 @@ final actor R2Service {
             service: "s3"
         )
 
+        // URL-encode the key for R2's S3-compatible API
+        let encodedKey = key.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? key
         let host = "\(config.bucket).\(config.accountId).r2.cloudflarestorage.com"
-        let path = "/\(key)"
+        let path = "/\(encodedKey)"
 
         return signing.presignURL(
             method: "GET",
@@ -231,6 +260,25 @@ final actor R2Service {
             path: path,
             expires: Int(expiresIn)
         )
+    }
+
+    // MARK: - Retry helper
+
+    private func retryAsync<T>(maxRetries: Int, operation: () async throws -> T) async throws -> T {
+        var lastError: Error?
+        for attempt in 0...maxRetries {
+            do {
+                return try await operation()
+            } catch {
+                lastError = error
+                if attempt < maxRetries {
+                    // Exponential backoff: 1s, 2s, 4s...
+                    let delay = UInt64(pow(2.0, Double(attempt))) * 1_000_000_000
+                    try await Task.sleep(nanoseconds: delay)
+                }
+            }
+        }
+        throw lastError ?? R2Error.uploadFailed("重试失败")
     }
 }
 

@@ -86,7 +86,7 @@ final class CryptoService {
             salt: saltBytes,
             iterations: 100_000,
             keyLength: 32, // AES-256
-            variant: .sha256
+            variant: .sha2(.sha256)
         ).calculate()
         return derived
     }
