@@ -35,6 +35,68 @@ struct R2File: Identifiable, Hashable {
             return .other
         }
     }
+
+    /// Check if this file is an image type (for inline QR)
+    var isImageType: Bool {
+        switch fileExtension.lowercased() {
+        case "jpg", "jpeg", "png", "gif", "webp", "heic", "svg", "bmp", "tiff", "tif":
+            return true
+        default:
+            return false
+        }
+    }
+}
+
+/// Represents either a file or a directory in a folder listing
+struct R2FolderItem: Identifiable, Hashable {
+    enum ItemType: Hashable {
+        case file(R2File)
+        case directory(String) // directory prefix, e.g. "img/"
+    }
+
+    let type: ItemType
+
+    var id: String {
+        switch type {
+        case .file(let file): return file.id
+        case .directory(let prefix): return "dir:\(prefix)"
+        }
+    }
+
+    var name: String {
+        switch type {
+        case .file(let file): return file.fileName
+        case .directory(let prefix):
+            // Remove trailing slash
+            let trimmed = prefix.hasSuffix("/") ? String(prefix.dropLast()) : prefix
+            return (trimmed as NSString).lastPathComponent
+        }
+    }
+
+    var isDirectory: Bool {
+        if case .directory = type { return true }
+        return false
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+    }
+
+    /// Extract the underlying R2File if this item is a file
+    var asFile: R2File? {
+        if case .file(let f) = type { return f }
+        return nil
+    }
+
+    /// Get the directory prefix if this is a directory
+    var directoryPrefix: String? {
+        if case .directory(let prefix) = type { return prefix }
+        return nil
+    }
+
+    static func == (lhs: R2FolderItem, rhs: R2FolderItem) -> Bool {
+        lhs.id == rhs.id
+    }
 }
 
 enum FileCategory: String, CaseIterable {

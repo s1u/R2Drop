@@ -33,12 +33,9 @@ final actor R2Service {
 
         client = S3Client(config: s3Config)
 
-        // Verify connection — use listBuckets for S3-compatible endpoints
-        // Note: R2 requires the correct endpoint, so we verify by accessing the bucket directly
         do {
             _ = try await client?.listBuckets(input: ListBucketsInput())
         } catch {
-            // listBuckets may fail on some R2 configurations, verify via listObjects instead
             let verifyInput = ListObjectsV2Input(bucket: config.bucket, maxKeys: 1)
             _ = try await client?.listObjectsV2(input: verifyInput)
         }
@@ -51,7 +48,64 @@ final actor R2Service {
 
     var isConnected: Bool { client != nil }
 
-    // MARK: - List Files
+    // MARK: - Folder-aware Listing
+
+    /// List contents of a "folder" using S3 delimiter
+    func listFolderContents(prefix: String = "", maxKeys: Int = 1000,
+                            continuationToken: String? = nil) async throws -> (items: [R2FolderItem], isTruncated: Bool, nextToken: String?) {
+        guard let client, let config else { throw R2Error.notConnected }
+
+        // Ensure prefix ends with / unless it's empty
+        let effectivePrefix = prefix.isEmpty ? "" : (prefix.hasSuffix("/") ? prefix : "\(prefix)/")
+
+        let input = ListObjectsV2Input(
+            bucket: config.bucket,
+            continuationToken: continuationToken,
+            delimiter: "/",
+            maxKeys: Int(maxKeys),
+            prefix: effectivePrefix
+        )
+
+        let output = try await client.listObjectsV2(input: input)
+
+        var items: [R2FolderItem] = []
+
+        // Collect subdirectories from commonPrefixes
+        if let prefixes = output.commonPrefixes {
+            for p in prefixes where !p.prefix!.isEmpty {
+                items.append(R2FolderItem(type: .directory(p.prefix!)))
+            }
+        }
+
+        // Collect files, skipping directory markers
+        let contents = output.contents ?? []
+        for obj in contents {
+            guard let key = obj.key, let lastMod = obj.lastModified else { continue }
+            // Skip directory markers (zero-byte objects ending with /)
+            if key.hasSuffix("/") && (obj.size ?? 0) == 0 { continue }
+            let file = R2File(
+                key: key,
+                size: obj.size.map(Int64.init) ?? Int64(0),
+                lastModified: lastMod,
+                etag: obj.eTag ?? ""
+            )
+            items.append(R2FolderItem(type: .file(file)))
+        }
+
+        // Sort: directories first (alphabetically), then files (by last modified desc)
+        items.sort { a, b in
+            if a.isDirectory && !b.isDirectory { return true }
+            if !a.isDirectory && b.isDirectory { return false }
+            if a.isDirectory && b.isDirectory { return a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending }
+            // Both files — sort by last modified desc
+            if let fa = a.asFile, let fb = b.asFile {
+                return fa.lastModified > fb.lastModified
+            }
+            return a.name < b.name
+        }
+
+        return (items, output.isTruncated ?? false, output.nextContinuationToken)
+    }
 
     func listFiles(prefix: String = "", maxKeys: Int = 1000,
                    continuationToken: String? = nil) async throws -> R2FileList {
@@ -87,32 +141,15 @@ final actor R2Service {
         )
     }
 
-    func listAllFiles() async throws -> [R2File] {
-        var allFiles: [R2File] = []
-        var token: String? = nil
+    // MARK: - Upload (with custom key)
 
-        repeat {
-            let result = try await listFiles(continuationToken: token)
-            allFiles.append(contentsOf: result.files)
-            token = result.isTruncated ? result.nextContinuationToken : nil
-        } while token != nil
-
-        return allFiles.sorted { $0.lastModified > $1.lastModified }
-    }
-
-    // MARK: - Upload (with retry)
-
-    /// Upload a file with automatic retry for transient failures.
-    func upload(fileURL: URL, progressHandler: @escaping (Double) -> Void) async throws {
+    /// Upload a file to a specific key path, preserving directory structure
+    func upload(fileURL: URL, key: String? = nil, progressHandler: @escaping (Double) -> Void) async throws {
         guard let client, let config else { throw R2Error.notConnected }
 
         let fileData = try Data(contentsOf: fileURL)
-        let key = fileURL.lastPathComponent
+        let objectKey = key ?? fileURL.lastPathComponent
         let fileSize = Int64(fileData.count)
-        let uploadId: String
-
-        // Check if file already exists — we overwrite silently
-        // (S3-compatible APIs overwrite on put)
 
         // For files < 50MB, use simple put
         if fileSize < 50_000_000 {
@@ -120,7 +157,7 @@ final actor R2Service {
                 let input = PutObjectInput(
                     body: .data(fileData),
                     bucket: config.bucket,
-                    key: key
+                    key: objectKey
                 )
                 _ = try await client.putObject(input: input)
             }
@@ -131,17 +168,13 @@ final actor R2Service {
         // Multipart upload for larger files
         let createInput = CreateMultipartUploadInput(
             bucket: config.bucket,
-            key: key
+            key: objectKey
         )
         let createOutput = try await client.createMultipartUpload(input: createInput)
         guard let uid = createOutput.uploadId else {
             throw R2Error.uploadFailed("无法获取 Upload ID")
         }
-        uploadId = uid
-
-        defer {
-            // Clean up if we fail mid-upload
-        }
+        let uploadId = uid
 
         let partSize = 10_485_760 // 10MB
         var completedParts: [S3ClientTypes.CompletedPart] = []
@@ -154,12 +187,11 @@ final actor R2Service {
             let chunkRange = Int(offset)..<Int(chunkEnd)
             let chunk = Data(fileData[chunkRange])
 
-            // Upload each part with retry
             try await retryAsync(maxRetries: 2) {
                 let uploadPartInput = UploadPartInput(
                     body: .data(chunk),
                     bucket: config.bucket,
-                    key: key,
+                    key: objectKey,
                     partNumber: partNumber,
                     uploadId: uploadId
                 )
@@ -167,11 +199,7 @@ final actor R2Service {
                 guard let etag = uploadOutput.eTag else {
                     throw R2Error.uploadFailed("分片 \(partNumber) 缺少 ETag")
                 }
-
-                completedParts.append(S3ClientTypes.CompletedPart(
-                    eTag: etag,
-                    partNumber: partNumber
-                ))
+                completedParts.append(S3ClientTypes.CompletedPart(eTag: etag, partNumber: partNumber))
             }
 
             bytesUploaded += chunkEnd - offset
@@ -182,7 +210,7 @@ final actor R2Service {
 
         let completeInput = CompleteMultipartUploadInput(
             bucket: config.bucket,
-            key: key,
+            key: objectKey,
             multipartUpload: S3ClientTypes.CompletedMultipartUpload(parts: completedParts),
             uploadId: uploadId
         )
@@ -198,7 +226,6 @@ final actor R2Service {
         let input = GetObjectInput(bucket: config.bucket, key: key)
         let output: GetObjectOutput
 
-        // Retry download on transient failure
         output = try await retryAsync(maxRetries: 2) {
             try await client.getObject(input: input)
         }
@@ -207,7 +234,6 @@ final actor R2Service {
             throw R2Error.downloadFailed("服务器返回空数据")
         }
 
-        let expectedSize = output.contentLength ?? 0
         let data: Data
         switch body {
         case .data(let optionalData):
@@ -238,7 +264,12 @@ final actor R2Service {
 
     // MARK: - Share (presigned URL)
 
-    func generateShareURL(key: String, expiresIn: TimeInterval = 3600) async throws -> URL {
+    /// Generate a presigned URL for sharing a file.
+    /// - Parameters:
+    ///   - key: Object key in the bucket
+    ///   - expiresIn: Seconds until URL expires
+    ///   - inline: If true, adds response-content-disposition=inline for direct viewing (images)
+    func generateShareURL(key: String, expiresIn: TimeInterval = 3600, inline: Bool = false) async throws -> URL {
         guard let config else { throw R2Error.notConnected }
         guard !key.isEmpty else { throw R2Error.shareFailed("文件名为空") }
 
@@ -249,16 +280,21 @@ final actor R2Service {
             service: "s3"
         )
 
-        // URL-encode the key for R2's S3-compatible API
         let encodedKey = key.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? key
         let host = "\(config.bucket).\(config.accountId).r2.cloudflarestorage.com"
         let path = "/\(encodedKey)"
+
+        var extraParams: [String: String] = [:]
+        if inline {
+            extraParams["response-content-disposition"] = "inline"
+        }
 
         return signing.presignURL(
             method: "GET",
             host: host,
             path: path,
-            expires: Int(expiresIn)
+            expires: Int(expiresIn),
+            extraQueryParams: extraParams
         )
     }
 
@@ -272,7 +308,6 @@ final actor R2Service {
             } catch {
                 lastError = error
                 if attempt < maxRetries {
-                    // Exponential backoff: 1s, 2s, 4s...
                     let delay = UInt64(pow(2.0, Double(attempt))) * 1_000_000_000
                     try await Task.sleep(nanoseconds: delay)
                 }
@@ -291,6 +326,7 @@ enum R2Error: Error, LocalizedError {
     case deleteFailed(String)
     case shareFailed(String)
     case featureNotImplemented
+    case unsupportedOperation(String)
 
     var errorDescription: String? {
         switch self {
@@ -300,6 +336,7 @@ enum R2Error: Error, LocalizedError {
         case .deleteFailed(let msg): return "删除失败: \(msg)"
         case .shareFailed(let msg): return "分享失败: \(msg)"
         case .featureNotImplemented: return "该功能尚未实现"
+        case .unsupportedOperation(let msg): return msg
         }
     }
 }

@@ -7,25 +7,21 @@ struct MainView: View {
 
     var body: some View {
         VSplitView {
-            // Top: Drop zone + file list
             VStack(spacing: 0) {
-                // Drop zone
                 DropZoneView()
                     .environmentObject(appState)
 
-                // File list
                 FileListView()
                     .environmentObject(appState)
             }
 
-            // Bottom: Transfer progress panel
             if appState.showTransferPanel {
                 TransferPanelView()
                     .environmentObject(appState)
                     .frame(height: 200)
             }
         }
-        .frame(minWidth: 600, minHeight: 400)
+        .frame(minWidth: 700, minHeight: 500)
     }
 }
 
@@ -52,8 +48,8 @@ struct DropZoneView: View {
                     .font(.system(size: 28))
                     .foregroundColor(isTargeted ? .blue : .secondary)
 
-                Text(isTargeted ? "松手上传" : "拖拽文件到此处上传")
-                    .font(.subheadline)
+                Text(isTargeted ? "松手上传" : "拖拽文件或文件夹到此处上传")
+                    .font(.body)
                     .foregroundColor(isTargeted ? .blue : .secondary)
             }
         }
@@ -72,37 +68,83 @@ struct DropZoneView: View {
                 guard let data = item as? Data,
                       let url = URL(dataRepresentation: data, relativeTo: nil) else { return }
                 Task { @MainActor in
-                    await appState.uploadFile(url: url)
+                    // Check if it's a directory
+                    let isDir = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
+                    if isDir {
+                        await appState.uploadFolder(url: url)
+                    } else {
+                        await appState.uploadFile(url: url)
+                    }
                 }
             }
         }
     }
 }
 
-// MARK: - File List (with drag-out download)
+// MARK: - File List (with folder navigation)
 
 struct FileListView: View {
     @EnvironmentObject var appState: AppState
-    @State private var selectedFile: R2File?
-    @State private var showDeleteConfirm = false
+    @State private var selectedItem: R2FolderItem?
 
     var body: some View {
         VStack(spacing: 0) {
             // Toolbar
             HStack {
                 Text("R2 文件")
-                    .font(.headline)
+                    .font(.title3)
+
+                // Breadcrumb navigation
+                if !appState.currentPath.isEmpty {
+                    Button(action: {
+                        appState.navigateToBreadcrumb(prefix: "")
+                    }) {
+                        Text("根目录")
+                            .font(.subheadline)
+                            .foregroundColor(.blue)
+                    }
+                    .buttonStyle(.plain)
+                    .help("返回根目录")
+
+                    ForEach(appState.navigationPath, id: \.prefix) { crumb in
+                        Image(systemName: "chevron.right")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+
+                        Button(action: {
+                            appState.navigateToBreadcrumb(prefix: crumb.prefix)
+                        }) {
+                            Text(crumb.displayName)
+                                .font(.subheadline)
+                                .foregroundColor(.blue)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
 
                 Spacer()
+
+                // Back button
+                if !appState.currentPath.isEmpty {
+                    Button(action: { appState.navigateUp() }) {
+                        Image(systemName: "arrow.up")
+                            .foregroundColor(.blue)
+                    }
+                    .buttonStyle(.plain)
+                    .help("返回上级")
+
+                    Divider()
+                        .frame(height: 16)
+                }
 
                 // Search
                 HStack(spacing: 4) {
                     Image(systemName: "magnifyingglass")
                         .foregroundColor(.secondary)
-                        .font(.caption)
-                    TextField("搜索文件...", text: $appState.searchQuery)
+                        .font(.subheadline)
+                    TextField("搜索...", text: $appState.searchQuery)
                         .textFieldStyle(.plain)
-                        .font(.caption)
+                        .font(.subheadline)
                 }
                 .frame(width: 200)
                 .padding(6)
@@ -110,7 +152,7 @@ struct FileListView: View {
                 .cornerRadius(6)
 
                 Button(action: {
-                    Task { await appState.refreshFileList() }
+                    Task { await appState.refreshFolderContents() }
                 }) {
                     Image(systemName: "arrow.clockwise")
                 }
@@ -121,7 +163,7 @@ struct FileListView: View {
                     appState.lock()
                 }
                 .buttonStyle(.plain)
-                .font(.caption)
+                .font(.subheadline)
                 .foregroundColor(.secondary)
             }
             .padding(.horizontal, 16)
@@ -129,19 +171,19 @@ struct FileListView: View {
 
             Divider()
 
-            // File count info
+            // Item count info
             HStack {
-                Text("共 \(appState.filteredFiles.count) 个文件")
-                    .font(.caption)
+                Text("共 \(appState.filteredItems.count) 项")
+                    .font(.subheadline)
                     .foregroundColor(.secondary)
                 Spacer()
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 4)
 
-            if appState.isLoadingFiles && appState.files.isEmpty {
+            if appState.isLoadingFiles && appState.folderItems.isEmpty {
                 Spacer()
-                ProgressView("正在加载文件列表...")
+                ProgressView("正在加载...")
                 Spacer()
             } else if let error = appState.fileListError {
                 Spacer()
@@ -150,32 +192,35 @@ struct FileListView: View {
                         .font(.largeTitle)
                         .foregroundColor(.orange)
                     Text(error)
-                        .font(.caption)
+                        .font(.subheadline)
                         .foregroundColor(.red)
                     Button("重试") {
-                        Task { await appState.refreshFileList() }
+                        Task { await appState.refreshFolderContents() }
                     }
                 }
                 Spacer()
-            } else if appState.filteredFiles.isEmpty {
+            } else if appState.filteredItems.isEmpty {
                 Spacer()
                 VStack(spacing: 8) {
                     Image(systemName: "tray")
                         .font(.system(size: 40))
                         .foregroundColor(.secondary)
                     Text(appState.searchQuery.isEmpty ? "暂无文件，拖拽文件到上方区域上传" : "没有匹配的文件")
-                        .font(.subheadline)
+                        .font(.body)
                         .foregroundColor(.secondary)
                 }
                 Spacer()
             } else {
                 ScrollView {
                     LazyVStack(spacing: 2) {
-                        ForEach(appState.filteredFiles) { file in
-                            FileRow(file: file, selectedFile: $selectedFile)
+                        ForEach(appState.filteredItems) { item in
+                            ItemRow(item: item, selectedItem: $selectedItem)
                                 .environmentObject(appState)
                                 .onTapGesture {
-                                    selectedFile = file
+                                    selectedItem = item
+                                    if item.isDirectory, let prefix = item.directoryPrefix {
+                                        appState.navigateTo(directory: prefix)
+                                    }
                                 }
                         }
                     }
@@ -186,89 +231,106 @@ struct FileListView: View {
     }
 }
 
-// MARK: - File Row
+// MARK: - Item Row (File or Directory)
 
-struct FileRow: View {
+struct ItemRow: View {
     @EnvironmentObject var appState: AppState
-    let file: R2File
-    @Binding var selectedFile: R2File?
-    @State private var isDragging = false
+    let item: R2FolderItem
+    @Binding var selectedItem: R2FolderItem?
     @State private var isDownloading = false
     @State private var shareURL: String?
     @State private var isGeneratingQR = false
     @State private var showQRCode = false
 
-    var isSelected: Bool { selectedFile?.id == file.id }
+    var isSelected: Bool { selectedItem?.id == item.id }
 
     var body: some View {
         HStack(spacing: 12) {
-            // File icon
-            Image(systemName: file.fileCategory.icon)
-                .font(.title3)
-                .foregroundColor(fileIconColor)
-                .frame(width: 24)
+            // Icon
+            if item.isDirectory {
+                Image(systemName: "folder.fill")
+                    .font(.title3)
+                    .foregroundColor(.blue)
+                    .frame(width: 24)
+            } else if let file = item.asFile {
+                Image(systemName: file.fileCategory.icon)
+                    .font(.title3)
+                    .foregroundColor(fileIconColor(for: file))
+                    .frame(width: 24)
+            } else {
+                Image(systemName: "doc")
+                    .font(.title3)
+                    .foregroundColor(.gray)
+                    .frame(width: 24)
+            }
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(file.fileName)
+                Text(item.name)
                     .font(.body)
                     .lineLimit(1)
 
-                HStack(spacing: 12) {
-                    Text(file.sizeFormatted)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-
-                    Text(file.lastModifiedFormatted)
-                        .font(.caption)
+                if let file = item.asFile {
+                    HStack(spacing: 12) {
+                        Text(file.sizeFormatted)
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                        Text(file.lastModifiedFormatted)
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                    }
+                } else {
+                    Text("目录")
+                        .font(.subheadline)
                         .foregroundColor(.secondary)
                 }
             }
 
             Spacer()
 
-            // Action buttons
-            HStack(spacing: 6) {
-                if isDownloading {
-                    ProgressView()
-                        .scaleEffect(0.7)
-                        .frame(width: 20)
-                }
-
-                // QR Code button
-                Button(action: shareFile) {
-                    if isGeneratingQR {
+            // Action buttons (only for files)
+            if let file = item.asFile {
+                HStack(spacing: 6) {
+                    if isDownloading {
                         ProgressView()
-                            .scaleEffect(0.6)
-                            .frame(width: 16, height: 16)
-                    } else {
-                        Image(systemName: "qrcode")
+                            .scaleEffect(0.7)
+                            .frame(width: 20)
+                    }
+
+                    Button(action: { shareFile(file) }) {
+                        if isGeneratingQR {
+                            ProgressView()
+                                .scaleEffect(0.6)
+                                .frame(width: 16, height: 16)
+                        } else {
+                            Image(systemName: "qrcode")
+                                .foregroundColor(.blue)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .help("分享二维码")
+                    .disabled(isGeneratingQR)
+
+                    Button(action: { downloadFile(file) }) {
+                        Image(systemName: "arrow.down.circle")
                             .foregroundColor(.blue)
                     }
-                }
-                .buttonStyle(.plain)
-                .help("分享二维码")
-                .disabled(isGeneratingQR)
+                    .buttonStyle(.plain)
+                    .help("下载")
 
-                Button(action: downloadFile) {
-                    Image(systemName: "arrow.down.circle")
-                        .foregroundColor(.blue)
-                }
-                .buttonStyle(.plain)
-                .help("下载")
-
-                Button(action: { confirmDelete() }) {
-                    Image(systemName: "trash")
-                        .foregroundColor(.red.opacity(0.7))
-                }
-                .buttonStyle(.plain)
-                .help("删除")
-                .alert("确认删除", isPresented: $showingDeleteAlert) {
-                    Button("取消", role: .cancel) {}
-                    Button("删除", role: .destructive) {
-                        Task { await appState.deleteFile(file: file) }
+                    Button(action: { showDeleteConfirm = true }) {
+                        Image(systemName: "trash")
+                            .foregroundColor(.red.opacity(0.7))
                     }
-                } message: {
-                    Text("确定要删除「\(file.fileName)」吗？此操作不可恢复。")
+                    .buttonStyle(.plain)
+                    .help("删除")
+                    .alert("确认删除", isPresented: $showDeleteConfirm) {
+                        Button("取消", role: .cancel) {}
+                        Button("删除", role: .destructive) {
+                            Task { await appState.deleteFile(file: file) }
+                        }
+                    } message: {
+                        Text("确定要删除「\(file.fileName)」吗？此操作不可恢复。")
+                    }
                 }
             }
         }
@@ -278,30 +340,27 @@ struct FileRow: View {
             RoundedRectangle(cornerRadius: 8)
                 .fill(isSelected ? Color.blue.opacity(0.08) : Color.clear)
         )
-        // Drag out to download
-        // Note: .onDrag is synchronous - we trigger download and provide file name
         .onDrag {
+            guard let file = item.asFile else { return NSItemProvider() }
             isDownloading = true
             Task {
                 let dest = FileHelper.uniqueDownloadURL(for: file.fileName)
                 await appState.downloadFile(file: file, to: dest)
                 await MainActor.run { isDownloading = false }
             }
-            // Provide a placeholder promise; the real file will be in the download folder
             let provider = NSItemProvider(object: "\(file.fileName) (下载完成后可在下载文件夹查看)" as NSString)
             return provider
         }
-        // QR code sheet
         .sheet(isPresented: $showQRCode) {
-            if let url = shareURL {
-                FileQRCodeView(fileName: file.fileName, shareURL: url)
+            if let url = shareURL, let file = item.asFile {
+                FileQRCodeView(fileName: file.fileName, shareURL: url, isImage: file.isImageType)
             }
         }
     }
 
-    @State private var showingDeleteAlert = false
+    @State private var showDeleteConfirm = false
 
-    private var fileIconColor: Color {
+    private func fileIconColor(for file: R2File) -> Color {
         switch file.fileCategory {
         case .image: return .green
         case .video: return .purple
@@ -313,35 +372,29 @@ struct FileRow: View {
         }
     }
 
-    private func shareFile() {
+    private func shareFile(_ file: R2File) {
         isGeneratingQR = true
         Task {
             do {
-                let url = try await appState.r2Service.generateShareURL(key: file.key, expiresIn: 3600)
+                let url = try await appState.r2Service.generateShareURL(key: file.key, expiresIn: 3600, inline: file.isImageType)
                 await MainActor.run {
                     shareURL = url.absoluteString
                     isGeneratingQR = false
                     showQRCode = true
                 }
             } catch {
-                await MainActor.run {
-                    isGeneratingQR = false
-                }
+                await MainActor.run { isGeneratingQR = false }
             }
         }
     }
 
-    private func downloadFile() {
+    private func downloadFile(_ file: R2File) {
         isDownloading = true
         Task {
             let dest = FileHelper.uniqueDownloadURL(for: file.fileName)
             await appState.downloadFile(file: file, to: dest)
             await MainActor.run { isDownloading = false }
         }
-    }
-
-    private func confirmDelete() {
-        showingDeleteAlert = true
     }
 }
 
@@ -364,14 +417,14 @@ struct TransferPanelView: View {
                     }
                 }
                 .buttonStyle(.plain)
-                .font(.caption)
+                .font(.subheadline)
                 .foregroundColor(.secondary)
 
                 Button("关闭") {
                     appState.showTransferPanel = false
                 }
                 .buttonStyle(.plain)
-                .font(.caption)
+                .font(.subheadline)
                 .foregroundColor(.secondary)
             }
             .padding(.horizontal, 16)
@@ -388,7 +441,6 @@ struct TransferPanelView: View {
                 .padding(8)
             }
         }
-        // QR Code popover
         .sheet(item: $showQRCode) { transfer in
             QRCodePopoverView(transfer: transfer)
                 .environmentObject(appState)
@@ -408,7 +460,7 @@ struct TransferRow: View {
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(transfer.fileName)
-                    .font(.caption)
+                    .font(.subheadline)
                     .lineLimit(1)
 
                 ProgressView(value: transfer.percentage, total: 100)
@@ -418,20 +470,19 @@ struct TransferRow: View {
 
                 HStack {
                     Text(transfer.percentageFormatted)
-                        .font(.caption2)
+                        .font(.subheadline)
                         .foregroundColor(.secondary)
                     Text(transfer.sizeFormatted)
-                        .font(.caption2)
+                        .font(.subheadline)
                         .foregroundColor(.secondary)
                     Spacer()
 
-                    // QR Code button (only for completed uploads)
                     if transfer.direction == .upload,
                        case .completed = transfer.status,
                        transfer.shareURL != nil {
                         Button(action: { showQR = transfer }) {
                             Image(systemName: "qrcode")
-                                .font(.caption)
+                                .font(.subheadline)
                                 .foregroundColor(.blue)
                         }
                         .buttonStyle(.plain)
@@ -440,7 +491,7 @@ struct TransferRow: View {
 
                     if case .failed(let error) = transfer.status {
                         Text(error)
-                            .font(.caption2)
+                            .font(.subheadline)
                             .foregroundColor(.red)
                     }
                 }
@@ -478,11 +529,11 @@ struct QRCodePopoverView: View {
                 Spacer()
                 Button("关闭") { dismiss() }
                     .buttonStyle(.plain)
-                    .font(.caption)
+                    .font(.subheadline)
             }
 
             Text(transfer.fileName)
-                .font(.subheadline)
+                .font(.body)
                 .foregroundColor(.secondary)
                 .lineLimit(1)
 
@@ -496,11 +547,10 @@ struct QRCodePopoverView: View {
                     .frame(width: 200, height: 200)
             }
 
-            // Share URL (truncated)
             if let url = transfer.shareURL {
                 HStack {
                     Text(url)
-                        .font(.caption2)
+                        .font(.subheadline)
                         .foregroundColor(.secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
@@ -514,7 +564,7 @@ struct QRCodePopoverView: View {
                         }
                     }) {
                         Image(systemName: showCopyToast ? "checkmark" : "doc.on.doc")
-                            .font(.caption)
+                            .font(.subheadline)
                     }
                     .buttonStyle(.plain)
                     .foregroundColor(showCopyToast ? .green : .blue)
@@ -524,8 +574,10 @@ struct QRCodePopoverView: View {
                 .cornerRadius(6)
             }
 
-            Text("链接有效期 1 小时，扫码或复制链接即可下载")
-                .font(.caption2)
+            Text(isImageExtension(transfer.fileName)
+                 ? "扫码即可直接查看图片"
+                 : "链接有效期 1 小时，扫码或复制链接即可下载")
+                .font(.subheadline)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
 
@@ -537,20 +589,18 @@ struct QRCodePopoverView: View {
                 dismiss()
             }
             .buttonStyle(.borderedProminent)
-            .controlSize(.small)
+            .controlSize(.regular)
 
             if showCopyToast {
                 Text("已复制到剪贴板")
-                    .font(.caption)
+                    .font(.subheadline)
                     .foregroundColor(.green)
                     .transition(.opacity)
             }
         }
         .padding(20)
-        .frame(width: 320)
-        .onAppear {
-            generateQR()
-        }
+        .frame(width: 340)
+        .onAppear { generateQR() }
     }
 
     private func generateQR() {
@@ -560,14 +610,19 @@ struct QRCodePopoverView: View {
         }
         qrImage = QRCodeGenerator.generate(from: urlString)
     }
+
+    private func isImageExtension(_ fileName: String) -> Bool {
+        let ext = (fileName as NSString).pathExtension.lowercased()
+        return ["jpg", "jpeg", "png", "gif", "webp", "heic", "svg", "bmp", "tiff", "tif"].contains(ext)
+    }
 }
 
 // MARK: - File QR Code View (from file list)
 
-/// QR code popover for existing files in the file list
 struct FileQRCodeView: View {
     let fileName: String
     let shareURL: String
+    let isImage: Bool
     @Environment(\.dismiss) private var dismiss
 
     @State private var qrImage: NSImage?
@@ -581,11 +636,11 @@ struct FileQRCodeView: View {
                 Spacer()
                 Button("关闭") { dismiss() }
                     .buttonStyle(.plain)
-                    .font(.caption)
+                    .font(.subheadline)
             }
 
             Text(fileName)
-                .font(.subheadline)
+                .font(.body)
                 .foregroundColor(.secondary)
                 .lineLimit(1)
 
@@ -599,10 +654,9 @@ struct FileQRCodeView: View {
                     .frame(width: 200, height: 200)
             }
 
-            // Share URL
             HStack {
                 Text(shareURL)
-                    .font(.caption2)
+                    .font(.subheadline)
                     .foregroundColor(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
@@ -616,7 +670,7 @@ struct FileQRCodeView: View {
                     }
                 }) {
                     Image(systemName: showCopyToast ? "checkmark" : "doc.on.doc")
-                        .font(.caption)
+                        .font(.subheadline)
                 }
                 .buttonStyle(.plain)
                 .foregroundColor(showCopyToast ? .green : .blue)
@@ -625,8 +679,10 @@ struct FileQRCodeView: View {
             .background(Color(NSColor.controlBackgroundColor))
             .cornerRadius(6)
 
-            Text("链接有效期 1 小时，扫码或复制链接即可下载")
-                .font(.caption2)
+            Text(isImage
+                 ? "扫码即可直接查看图片"
+                 : "链接有效期 1 小时，扫码或复制链接即可下载")
+                .font(.subheadline)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
 
@@ -636,23 +692,22 @@ struct FileQRCodeView: View {
                 dismiss()
             }
             .buttonStyle(.borderedProminent)
-            .controlSize(.small)
+            .controlSize(.regular)
 
             if showCopyToast {
                 Text("已复制到剪贴板")
-                    .font(.caption)
+                    .font(.subheadline)
                     .foregroundColor(.green)
                     .transition(.opacity)
             }
         }
         .padding(20)
-        .frame(width: 320)
+        .frame(width: 340)
         .onAppear {
             qrImage = QRCodeGenerator.generate(from: shareURL)
         }
     }
 }
-
 
 // MARK: - Date Formatting
 

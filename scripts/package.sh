@@ -54,8 +54,12 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-echo "🔏 签名..."
+echo "🔏 签名（ad-hoc）..."
 codesign --force --deep --sign - "$APP_BUNDLE"
+
+# 去掉隔离属性，避免 Gatekeeper 阻拦未签名应用
+echo "🗑️  清除隔离属性..."
+xattr -r -d com.apple.quarantine "$APP_BUNDLE" 2>/dev/null || true
 
 echo "💿 打包 DMG..."
 hdiutil create -volname "$APP" -srcfolder "$APP_BUNDLE" -ov -format UDZO "$DMG"

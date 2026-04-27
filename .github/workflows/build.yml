@@ -53,7 +53,10 @@ jobs:
         PLIST
         
         codesign --force --deep --sign - "$APP.app"
-        echo "Codesign done"
+        echo "Codesign done (ad-hoc)"
+        # Remove quarantine attribute to avoid Gatekeeper blocking on download
+        xattr -r -d com.apple.quarantine "$APP.app" 2>/dev/null || true
+        echo "Quarantine attribute removed"
         
         hdiutil create -volname "$APP" -srcfolder "$APP.app" -ov -format UDZO "$DMG"
         echo "DMG created: $DMG ($(du -h "$DMG" | cut -f1))"

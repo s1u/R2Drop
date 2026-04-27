@@ -33,12 +33,14 @@ struct SigV4Signer {
     ///   - host: Virtual-hosted-style host, e.g. "bucket.accountid.r2.cloudflarestorage.com"
     ///   - path: Object path, e.g. "/myfile.pdf"
     ///   - expires: Time-to-live in seconds
+    ///   - extraQueryParams: Additional query parameters to include (e.g., response-content-disposition)
     ///   - date: Optional date (defaults to now)
     /// - Returns: Presigned URL with query string auth parameters
     func presignURL(method: String = "GET",
                     host: String,
                     path: String,
                     expires: Int = 3600,
+                    extraQueryParams: [String: String] = [:],
                     date: Date = Date()) -> URL {
 
         let now = date
@@ -49,16 +51,28 @@ struct SigV4Signer {
         // S3 key for hashing
         let signedHeaders = "host"
 
+        // Build query items: standard SigV4 params + extra params
+        var queryItems: [URLQueryItem] = [
+            URLQueryItem(name: "X-Amz-Algorithm", value: algorithm),
+            URLQueryItem(name: "X-Amz-Credential", value: "\(accessKey)/\(credentialScope)"),
+            URLQueryItem(name: "X-Amz-Date", value: amzDate),
+            URLQueryItem(name: "X-Amz-Expires", value: String(expires)),
+            URLQueryItem(name: "X-Amz-SignedHeaders", value: signedHeaders),
+        ]
+
+        // Add extra query params (e.g., response-content-disposition)
+        for (key, value) in extraQueryParams.sorted(by: { $0.key < $1.key }) {
+            queryItems.append(URLQueryItem(name: key, value: value))
+        }
+
+        // Build canonical query string (sorted by key name)
+        let sortedQueryItems = queryItems.sorted { $0.name < $1.name }
+        let canonicalQueryString = sortedQueryItems
+            .map { "\($0.name)=\(uriEncode($0.value ?? ""))" }
+            .joined(separator: "&")
+
         // Canonical request components
         let canonicalURI = path.isEmpty ? "/" : path
-        let canonicalQueryString = [
-            "X-Amz-Algorithm=\(algorithm)",
-            "X-Amz-Credential=\(percentEncode("\(accessKey)/\(credentialScope)"))",
-            "X-Amz-Date=\(amzDate)",
-            "X-Amz-Expires=\(expires)",
-            "X-Amz-SignedHeaders=\(signedHeaders)",
-        ].joined(separator: "&")
-
         let canonicalHeaders = "host:\(host)\n"
         let payloadHash = sha256Hex("") // Empty body for GET
 
@@ -88,14 +102,11 @@ struct SigV4Signer {
         components.scheme = "https"
         components.host = host
         components.path = path
-        components.queryItems = [
-            URLQueryItem(name: "X-Amz-Algorithm", value: algorithm),
-            URLQueryItem(name: "X-Amz-Credential", value: "\(accessKey)/\(credentialScope)"),
-            URLQueryItem(name: "X-Amz-Date", value: amzDate),
-            URLQueryItem(name: "X-Amz-Expires", value: String(expires)),
-            URLQueryItem(name: "X-Amz-SignedHeaders", value: signedHeaders),
-            URLQueryItem(name: "X-Amz-Signature", value: signature),
-        ]
+
+        // Add the signature as the last query item
+        var finalQueryItems = sortedQueryItems
+        finalQueryItems.append(URLQueryItem(name: "X-Amz-Signature", value: signature))
+        components.queryItems = finalQueryItems
 
         return components.url!
     }
@@ -122,11 +133,15 @@ struct SigV4Signer {
         return hash.map { String(format: "%02x", $0) }.joined()
     }
 
-    /// Percent-encode per RFC 3986 (needed for X-Amz-Credential)
-    private func percentEncode(_ string: String) -> String {
-        // AWS SigV4 requires that some characters are encoded
+    /// Percent-encode per AWS SigV4 spec (slightly different from RFC 3986)
+    private func uriEncode(_ string: String) -> String {
+        // AWS SigV4 requires percent-encoding of special chars
         let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
-        return string.addingPercentEncoding(withAllowedCharacters: allowed) ?? string
+        guard let encoded = string.addingPercentEncoding(withAllowedCharacters: allowed) else {
+            return string
+        }
+        // AWS SigV4 also requires encoding of '*' → '%2A' and '%7E' → '~' (already handled by ~ being in allowed set)
+        return encoded
     }
 }
 
