@@ -18,19 +18,24 @@ jobs:
       run: swift build -c release
       
     - name: Package DMG
+      id: package
       run: |
         APP=R2Drop
-        BIN=.build/release/$APP
-        test -f "$BIN" || exit 1
+        BIN=".build/release/$APP"
+        DMG="$APP-macOS.dmg"
+        test -f "$BIN" || { echo "Binary not found at $BIN"; exit 1; }
+        echo "Binary found: $(file "$BIN")"
+        
         mkdir -p "$APP.app/Contents/MacOS"
         cp "$BIN" "$APP.app/Contents/MacOS/$APP"
-        cat > "$APP.app/Contents/Info.plist" <<EOF
+        
+        cat > "$APP.app/Contents/Info.plist" <<'PLIST'
         <?xml version="1.0" encoding="UTF-8"?>
         <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
         <plist version="1.0">
         <dict>
             <key>CFBundleExecutable</key>
-            <string>$APP</string>
+            <string>R2Drop</string>
             <key>CFBundleIdentifier</key>
             <string>app.r2drop</string>
             <key>CFBundleName</key>
@@ -45,12 +50,52 @@ jobs:
             <string>14.0</string>
         </dict>
         </plist>
-        EOF
-        codesign --force --deep --sign - "$APP.app"
-        hdiutil create -volname "$APP" -srcfolder "$APP.app" -ov -format UDZO "$APP-macOS.dmg"
+        PLIST
         
-    - name: Upload artifact
+        codesign --force --deep --sign - "$APP.app"
+        echo "Codesign done"
+        
+        hdiutil create -volname "$APP" -srcfolder "$APP.app" -ov -format UDZO "$DMG"
+        echo "DMG created: $DMG ($(du -h "$DMG" | cut -f1))"
+        
+        echo "dmg_name=$DMG" >> "$GITHUB_OUTPUT"
+    
+    - name: Upload artifact (always)
       uses: actions/upload-artifact@v4
       with:
         name: R2Drop-macOS
-        path: R2Drop-macOS.dmg
+        path: ${{ steps.package.outputs.dmg_name }}
+        if-no-files-found: error
+
+  release:
+    name: Create Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Download built DMG
+      uses: actions/download-artifact@v4
+      with:
+        name: R2Drop-macOS
+        path: release-artifacts
+    
+    - name: Create Release
+      uses: softprops/action-gh-release@v2
+      with:
+        name: R2Drop ${{ github.ref_name }}
+        tag_name: ${{ github.ref_name }}
+        body: |
+          ## R2Drop ${{ github.ref_name }}
+
+          查看 [README](https://github.com/${{ github.repository }}) 了解使用说明。
+        draft: false
+        prerelease: false
+        generate_release_notes: true
+        files: release-artifacts/*
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
