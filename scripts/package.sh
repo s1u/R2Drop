@@ -12,7 +12,19 @@ DMG="$APP-macOS.dmg"
 cd "$(dirname "$0")/.."
 
 echo "🦞 编译 R2Drop..."
-swift build -c release
+
+# 依赖下载失败时自动重试（最多 3 次）
+for i in 1 2 3; do
+  if swift build -c release 2>&1; then
+    break
+  fi
+  if [ $i -eq 3 ]; then
+    echo "❌ 编译失败，已重试 3 次，请检查网络后重试"
+    exit 1
+  fi
+  echo "⚠️  编译失败（第 $i 次），等待 5 秒后重试..."
+  sleep 5
+done
 
 echo "📦 打包 $APP_BUNDLE..."
 mkdir -p "$APP_BUNDLE/Contents/MacOS"
