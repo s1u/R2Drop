@@ -171,6 +171,7 @@ final class AppState: ObservableObject {
                 transfers[idx].shareURL = shareURL?.absoluteString
             }
 
+            try? await Task.sleep(nanoseconds: 300_000_000)
             await refreshFolderContents()
         } catch {
             await updateTransferStatus(id: progressId, status: .failed(error.localizedDescription))
@@ -195,8 +196,8 @@ final class AppState: ObservableObject {
             guard let resourceValues = try? fileURL.resourceValues(forKeys: [.isDirectoryKey]),
                   let isDir = resourceValues.isDirectory,
                   !isDir else { continue }
-            // Relative path from the root of the dropped folder
-            let relativePath = fileURL.pathComponents.dropFirst(url.pathComponents.count).joined(separator: "/")
+            // Relative path from the root of the dropped folder, including folder name
+            let relativePath = fileURL.pathComponents.dropFirst(url.pathComponents.count - 1).joined(separator: "/")
             let key = "\(basePrefix)\(relativePath)"
             pendingFiles.append((relativePath, fileURL))
         }
@@ -246,6 +247,7 @@ final class AppState: ObservableObject {
             }
         }
 
+        try? await Task.sleep(nanoseconds: 500_000_000)
         await refreshFolderContents()
     }
 
@@ -289,7 +291,136 @@ final class AppState: ObservableObject {
     func deleteFile(file: R2File) async {
         do {
             try await r2Service.deleteFile(key: file.key)
+            try? await Task.sleep(nanoseconds: 200_000_000)
             await refreshFolderContents()
+        } catch {
+            await MainActor.run { fileListError = error.localizedDescription }
+        }
+    }
+
+    /// Download all files under a folder prefix to a local zip archive
+    func downloadFolder(prefix: String, folderName: String) async {
+        let progressId = UUID()
+
+        await MainActor.run {
+            let progress = TransferProgress(
+                id: progressId,
+                fileName: folderName,
+                fileSize: 0,
+                bytesTransferred: 0,
+                status: .waiting,
+                direction: .download,
+                shareURL: nil
+            )
+            transfers.append(progress)
+            showTransferPanel = true
+        }
+
+        await updateTransferStatus(id: progressId, status: .downloading)
+
+        do {
+            // List all files with this prefix (handle pagination)
+            var allFiles: [R2File] = []
+            var nextToken: String? = nil
+            repeat {
+                let fileList = try await r2Service.listFiles(prefix: prefix, continuationToken: nextToken)
+                allFiles.append(contentsOf: fileList.files)
+                nextToken = fileList.nextContinuationToken
+            } while nextToken != nil
+
+            guard !allFiles.isEmpty else {
+                await updateTransferStatus(id: progressId, status: .failed("文件夹为空"))
+                return
+            }
+
+            let tempDir = FileManager.default.temporaryDirectory
+                .appendingPathComponent(UUID().uuidString)
+            try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+
+            let totalBytes = allFiles.reduce(Int64(0)) { $0 + $1.size }
+            await MainActor.run {
+                if let idx = transfers.firstIndex(where: { $0.id == progressId }) {
+                    transfers[idx].fileSize = totalBytes
+                }
+            }
+
+            // Download each file preserving folder structure
+            let actor = DownloadedBytesActor()
+            for file in allFiles {
+                var relativePath = file.key
+                if relativePath.hasPrefix(prefix) {
+                    relativePath = String(relativePath.dropFirst(prefix.count))
+                }
+                if relativePath.isEmpty {
+                    relativePath = file.fileName
+                }
+                let destURL = tempDir.appendingPathComponent(relativePath)
+                try FileManager.default.createDirectory(
+                    at: destURL.deletingLastPathComponent(),
+                    withIntermediateDirectories: true
+                )
+
+                try await r2Service.download(key: file.key, destination: destURL) { [progressId] pct in
+                    Task {
+                        let downloaded = await actor.value
+                        let fileBytes = Int64(Double(file.size) * pct / 100.0)
+                        await MainActor.run { [weak self] in
+                            guard let self, let idx = self.transfers.firstIndex(where: { $0.id == progressId }) else { return }
+                            self.transfers[idx].bytesTransferred = downloaded + fileBytes
+                        }
+                    }
+                }
+                await actor.add(file.size)
+            }
+
+            // Create zip archive using ditto
+            let zipURL = FileHelper.uniqueDownloadURL(for: "\(folderName).zip")
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+            process.arguments = ["-c", "-k", "--sequesterRsrc", "--keepParent", tempDir.path, zipURL.path]
+            try process.run()
+            process.waitUntilExit()
+            if process.terminationStatus != 0 {
+                throw R2Error.unsupportedOperation("压缩文件夹失败")
+            }
+
+            try? FileManager.default.removeItem(at: tempDir)
+            await updateTransferStatus(id: progressId, status: .completed)
+
+            await MainActor.run {
+                NSWorkspace.shared.activateFileViewerSelecting([zipURL])
+            }
+        } catch {
+            await updateTransferStatus(id: progressId, status: .failed(error.localizedDescription))
+        }
+    }
+
+    /// Delete all files under a folder prefix recursively
+    func deleteFolder(prefix: String) async {
+        do {
+            var deleteError: String?
+            var nextToken: String? = nil
+
+            repeat {
+                let fileList = try await r2Service.listFiles(prefix: prefix, continuationToken: nextToken)
+                for file in fileList.files {
+                    do {
+                        try await r2Service.deleteFile(key: file.key)
+                    } catch {
+                        deleteError = "删除 \(file.fileName) 失败"
+                        break
+                    }
+                }
+                if deleteError != nil { break }
+                nextToken = fileList.nextContinuationToken
+            } while nextToken != nil
+
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            await refreshFolderContents()
+
+            if let error = deleteError {
+                await MainActor.run { fileListError = error }
+            }
         } catch {
             await MainActor.run { fileListError = error.localizedDescription }
         }
@@ -307,5 +438,14 @@ final class AppState: ObservableObject {
     private func updateTransferStatus(id: UUID, status: TransferStatus) {
         guard let idx = transfers.firstIndex(where: { $0.id == id }) else { return }
         transfers[idx].status = status
+    }
+}
+
+/// Thread-safe counter for tracking downloaded bytes in folder download
+private actor DownloadedBytesActor {
+    var value: Int64 = 0
+
+    func add(_ bytes: Int64) {
+        value += bytes
     }
 }

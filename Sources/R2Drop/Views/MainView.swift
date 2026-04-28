@@ -287,15 +287,15 @@ struct ItemRow: View {
 
             Spacer()
 
-            // Action buttons (only for files)
-            if let file = item.asFile {
-                HStack(spacing: 6) {
-                    if isDownloading {
-                        ProgressView()
-                            .scaleEffect(0.7)
-                            .frame(width: 20)
-                    }
+            // Action buttons
+            HStack(spacing: 6) {
+                if isDownloading {
+                    ProgressView()
+                        .scaleEffect(0.7)
+                        .frame(width: 20)
+                }
 
+                if let file = item.asFile {
                     Button(action: { shareFile(file) }) {
                         if isGeneratingQR {
                             ProgressView()
@@ -316,20 +316,35 @@ struct ItemRow: View {
                     }
                     .buttonStyle(.plain)
                     .help("下载")
-
-                    Button(action: { showDeleteConfirm = true }) {
-                        Image(systemName: "trash")
-                            .foregroundColor(.red.opacity(0.7))
+                } else if item.isDirectory {
+                    Button(action: { downloadFolder() }) {
+                        Image(systemName: "arrow.down.circle")
+                            .foregroundColor(.blue)
                     }
                     .buttonStyle(.plain)
-                    .help("删除")
-                    .alert("确认删除", isPresented: $showDeleteConfirm) {
-                        Button("取消", role: .cancel) {}
-                        Button("删除", role: .destructive) {
+                    .help("下载文件夹")
+                }
+
+                Button(action: { showDeleteConfirm = true }) {
+                    Image(systemName: "trash")
+                        .foregroundColor(.red.opacity(0.7))
+                }
+                .buttonStyle(.plain)
+                .help("删除")
+                .alert("确认删除", isPresented: $showDeleteConfirm) {
+                    Button("取消", role: .cancel) {}
+                    Button("删除", role: .destructive) {
+                        if let file = item.asFile {
                             Task { await appState.deleteFile(file: file) }
+                        } else if let prefix = item.directoryPrefix {
+                            Task { await appState.deleteFolder(prefix: prefix) }
                         }
-                    } message: {
+                    }
+                } message: {
+                    if let file = item.asFile {
                         Text("确定要删除「\(file.fileName)」吗？此操作不可恢复。")
+                    } else {
+                        Text("确定要删除文件夹「\(item.name)」及其所有内容吗？此操作不可恢复。")
                     }
                 }
             }
@@ -341,15 +356,25 @@ struct ItemRow: View {
                 .fill(isSelected ? Color.blue.opacity(0.08) : Color.clear)
         )
         .onDrag {
-            guard let file = item.asFile else { return NSItemProvider() }
-            isDownloading = true
-            Task {
-                let dest = FileHelper.uniqueDownloadURL(for: file.fileName)
-                await appState.downloadFile(file: file, to: dest)
-                await MainActor.run { isDownloading = false }
+            if let file = item.asFile {
+                isDownloading = true
+                Task {
+                    let dest = FileHelper.uniqueDownloadURL(for: file.fileName)
+                    await appState.downloadFile(file: file, to: dest)
+                    await MainActor.run { isDownloading = false }
+                }
+                let provider = NSItemProvider(object: "\(file.fileName) (下载完成后可在下载文件夹查看)" as NSString)
+                return provider
+            } else if let prefix = item.directoryPrefix {
+                isDownloading = true
+                Task {
+                    await appState.downloadFolder(prefix: prefix, folderName: item.name)
+                    await MainActor.run { isDownloading = false }
+                }
+                let provider = NSItemProvider(object: "\(item.name) (文件夹下载完成后可在下载文件夹查看)" as NSString)
+                return provider
             }
-            let provider = NSItemProvider(object: "\(file.fileName) (下载完成后可在下载文件夹查看)" as NSString)
-            return provider
+            return NSItemProvider()
         }
         .sheet(isPresented: $showQRCode) {
             if let url = shareURL, let file = item.asFile {
@@ -359,6 +384,15 @@ struct ItemRow: View {
     }
 
     @State private var showDeleteConfirm = false
+
+    private func downloadFolder() {
+        guard let prefix = item.directoryPrefix else { return }
+        isDownloading = true
+        Task {
+            await appState.downloadFolder(prefix: prefix, folderName: item.name)
+            await MainActor.run { isDownloading = false }
+        }
+    }
 
     private func fileIconColor(for file: R2File) -> Color {
         switch file.fileCategory {
