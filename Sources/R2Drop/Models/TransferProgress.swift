@@ -4,7 +4,7 @@ import Foundation
 struct TransferProgress: Identifiable {
     let id: UUID
     let fileName: String
-    let fileSize: Int64
+    var fileSize: Int64
     var bytesTransferred: Int64
     var status: TransferStatus
     let direction: TransferDirection
