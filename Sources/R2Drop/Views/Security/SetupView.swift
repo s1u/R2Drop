@@ -6,13 +6,14 @@ struct SetupView: View {
     @State private var bucket = ""
     @State private var accessKeyId = ""
     @State private var secretAccessKey = ""
+    @State private var customDomain = ""
     @State private var masterPassword = ""
     @State private var confirmPassword = ""
     @State private var isSettingUp = false
     @State private var errorMessage: String?
     @FocusState private var focusField: Field?
 
-    enum Field { case accountId, bucket, accessKey, secretKey, password, confirm }
+    enum Field { case accountId, bucket, accessKey, secretKey, customDomain, password, confirm }
 
     var passwordsMatch: Bool {
         !masterPassword.isEmpty && masterPassword == confirmPassword
@@ -70,6 +71,13 @@ struct SetupView: View {
                         SecureField("your-secret-access-key", text: $secretAccessKey)
                             .textFieldStyle(.roundedBorder)
                             .focused($focusField, equals: .secretKey)
+                    }
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("自定义域名（可选）").font(.caption).foregroundColor(.secondary)
+                        TextField("r2drop.example.com", text: $customDomain)
+                            .textFieldStyle(.roundedBorder)
+                            .focused($focusField, equals: .customDomain)
                     }
                 }
                 .frame(width: 360)
@@ -135,7 +143,8 @@ struct SetupView: View {
             accountId: accountId,
             bucket: bucket,
             accessKeyId: accessKeyId,
-            secretAccessKey: secretAccessKey
+            secretAccessKey: secretAccessKey,
+            customDomain: customDomain.isEmpty ? nil : customDomain
         )
 
         Task {
