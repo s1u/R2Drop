@@ -15,7 +15,18 @@ jobs:
     - uses: actions/checkout@v4
     
     - name: Build
-      run: swift build -c release
+      run: |
+        for i in 1 2 3; do
+          if swift build -c release 2>&1; then
+            break
+          fi
+          if [ $i -eq 3 ]; then
+            echo "Build failed after 3 attempts"
+            exit 1
+          fi
+          echo "Build attempt $i failed, retrying in 10s..."
+          sleep 10
+        done
       
     - name: Package DMG
       id: package

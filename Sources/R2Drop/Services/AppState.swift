@@ -379,17 +379,11 @@ final class AppState: ObservableObject {
             let zipURL = FileHelper.uniqueDownloadURL(for: "\(folderName).zip")
             let coordinator = NSFileCoordinator()
             var zipError: NSError?
-            var zipSuccess = false
             coordinator.coordinate(readingItemAt: tempDir, options: [.forUploading], error: &zipError) { zipTempURL in
-                do {
-                    if FileManager.default.fileExists(atPath: zipURL.path) {
-                        try FileManager.default.removeItem(at: zipURL)
-                    }
-                    try FileManager.default.moveItem(at: zipTempURL, to: zipURL)
-                    zipSuccess = true
-                } catch {
-                    print("Failed to move zip: \(error)")
+                if FileManager.default.fileExists(atPath: zipURL.path) {
+                    try? FileManager.default.removeItem(at: zipURL)
                 }
+                try? FileManager.default.moveItem(at: zipTempURL, to: zipURL)
             }
 
             if let error = zipError {
