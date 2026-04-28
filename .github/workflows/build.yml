@@ -16,19 +16,22 @@ jobs:
     
     - name: Build
       run: |
-        echo "::group::Swift build output"
-        swift build -c release 2>&1 | tee /tmp/swift_build.log || true
-        echo "::endgroup::"
-        echo "::error::Build errors:"
-        grep -i "error:" /tmp/swift_build.log | head -30 || echo "No specific errors found"
-        # Check if build succeeded (last line of log should have no errors)
-        if grep -q "Build complete" /tmp/swift_build.log; then
-          echo "::notice::Build succeeded"
+        if swift build -c release 2>&1 | tee /tmp/swift_build.log; then
+          echo "Build succeeded"
           exit 0
         fi
-        # Show warnings 
-        echo "::warning::Showing last 30 lines of build log"
-        tail -30 /tmp/swift_build.log
+        # Build failed - capture errors in summary
+        {
+          echo "## Build Errors"
+          echo '```'
+          grep -i "error:" /tmp/swift_build.log | head -40 || echo "No specific error lines"
+          echo '```'
+          echo ""
+          echo "## Last 40 lines"
+          echo '```'
+          tail -40 /tmp/swift_build.log
+          echo '```'
+        } >> "$GITHUB_STEP_SUMMARY"
         exit 1
       
     - name: Package DMG
