@@ -264,28 +264,15 @@ final actor R2Service {
 
     // MARK: - Share (presigned URL)
 
-    /// Generate a share URL for a file.
-    /// Uses the custom domain if configured, otherwise generates a presigned URL.
+    /// Generate a presigned URL for sharing a file.
     /// - Parameters:
     ///   - key: Object key in the bucket
-    ///   - expiresIn: Seconds until URL expires (only used for presigned URLs)
-    ///   - inline: If true, adds response-content-disposition=inline for direct viewing
+    ///   - expiresIn: Seconds until URL expires
+    ///   - inline: If true, adds response-content-disposition=inline for direct viewing (images)
     func generateShareURL(key: String, expiresIn: TimeInterval = 3600, inline: Bool = false) async throws -> URL {
         guard let config else { throw R2Error.notConnected }
         guard !key.isEmpty else { throw R2Error.shareFailed("文件名为空") }
 
-        let encodedKey = key.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? key
-
-        // If custom domain is configured, generate a simple public URL
-        if let domain = config.customDomain, !domain.isEmpty {
-            var components = URLComponents()
-            components.scheme = "https"
-            components.host = domain
-            components.path = "/\(encodedKey)"
-            return components.url!
-        }
-
-        // Fall back to presigned URL
         let signing = SigV4Signer(
             accessKey: config.accessKeyId,
             secretKey: config.secretAccessKey,
@@ -293,6 +280,7 @@ final actor R2Service {
             service: "s3"
         )
 
+        let encodedKey = key.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? key
         let host = "\(config.bucket).\(config.accountId).r2.cloudflarestorage.com"
         let path = "/\(encodedKey)"
 

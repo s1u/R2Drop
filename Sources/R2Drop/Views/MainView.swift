@@ -287,16 +287,15 @@ struct ItemRow: View {
 
             Spacer()
 
-            // Action buttons
-            HStack(spacing: 6) {
-                if isDownloading {
-                    ProgressView()
-                        .scaleEffect(0.7)
-                        .frame(width: 20)
-                }
+            // Action buttons (only for files)
+            if let file = item.asFile {
+                HStack(spacing: 6) {
+                    if isDownloading {
+                        ProgressView()
+                            .scaleEffect(0.7)
+                            .frame(width: 20)
+                    }
 
-                // QR code for files, delete for both files and folders
-                if let file = item.asFile {
                     Button(action: { shareFile(file) }) {
                         if isGeneratingQR {
                             ProgressView()
@@ -317,35 +316,20 @@ struct ItemRow: View {
                     }
                     .buttonStyle(.plain)
                     .help("下载")
-                } else if item.isDirectory {
-                    Button(action: { downloadFolder() }) {
-                        Image(systemName: "arrow.down.circle")
-                            .foregroundColor(.blue)
+
+                    Button(action: { showDeleteConfirm = true }) {
+                        Image(systemName: "trash")
+                            .foregroundColor(.red.opacity(0.7))
                     }
                     .buttonStyle(.plain)
-                    .help("下载文件夹")
-                }
-
-                Button(action: { showDeleteConfirm = true }) {
-                    Image(systemName: "trash")
-                        .foregroundColor(.red.opacity(0.7))
-                }
-                .buttonStyle(.plain)
-                .help("删除")
-                .alert("确认删除", isPresented: $showDeleteConfirm) {
-                    Button("取消", role: .cancel) {}
-                    Button("删除", role: .destructive) {
-                        if let file = item.asFile {
+                    .help("删除")
+                    .alert("确认删除", isPresented: $showDeleteConfirm) {
+                        Button("取消", role: .cancel) {}
+                        Button("删除", role: .destructive) {
                             Task { await appState.deleteFile(file: file) }
-                        } else if let prefix = item.directoryPrefix {
-                            Task { await appState.deleteFolder(prefix: prefix) }
                         }
-                    }
-                } message: {
-                    if let file = item.asFile {
+                    } message: {
                         Text("确定要删除「\(file.fileName)」吗？此操作不可恢复。")
-                    } else {
-                        Text("确定要删除文件夹「\(item.name)」及其所有内容吗？此操作不可恢复。")
                     }
                 }
             }
@@ -357,25 +341,15 @@ struct ItemRow: View {
                 .fill(isSelected ? Color.blue.opacity(0.08) : Color.clear)
         )
         .onDrag {
-            if let file = item.asFile {
-                isDownloading = true
-                Task {
-                    let dest = FileHelper.uniqueDownloadURL(for: file.fileName)
-                    await appState.downloadFile(file: file, to: dest)
-                    await MainActor.run { isDownloading = false }
-                }
-                let provider = NSItemProvider(object: "\(file.fileName) (下载完成后可在下载文件夹查看)" as NSString)
-                return provider
-            } else if let prefix = item.directoryPrefix {
-                isDownloading = true
-                Task {
-                    await appState.downloadFolder(prefix: prefix, folderName: item.name)
-                    await MainActor.run { isDownloading = false }
-                }
-                let provider = NSItemProvider(object: "\(item.name) (文件夹下载完成后可在下载文件夹查看)" as NSString)
-                return provider
+            guard let file = item.asFile else { return NSItemProvider() }
+            isDownloading = true
+            Task {
+                let dest = FileHelper.uniqueDownloadURL(for: file.fileName)
+                await appState.downloadFile(file: file, to: dest)
+                await MainActor.run { isDownloading = false }
             }
-            return NSItemProvider()
+            let provider = NSItemProvider(object: "\(file.fileName) (下载完成后可在下载文件夹查看)" as NSString)
+            return provider
         }
         .sheet(isPresented: $showQRCode) {
             if let url = shareURL, let file = item.asFile {
@@ -385,15 +359,6 @@ struct ItemRow: View {
     }
 
     @State private var showDeleteConfirm = false
-
-    private func downloadFolder() {
-        guard let prefix = item.directoryPrefix else { return }
-        isDownloading = true
-        Task {
-            await appState.downloadFolder(prefix: prefix, folderName: item.name)
-            await MainActor.run { isDownloading = false }
-        }
-    }
 
     private func fileIconColor(for file: R2File) -> Color {
         switch file.fileCategory {
@@ -609,7 +574,9 @@ struct QRCodePopoverView: View {
                 .cornerRadius(6)
             }
 
-            Text(qrHint(for: transfer.fileName))
+            Text(isImageExtension(transfer.fileName)
+                 ? "扫码即可直接查看图片"
+                 : "链接有效期 1 小时，扫码或复制链接即可下载")
                 .font(.subheadline)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
@@ -712,7 +679,9 @@ struct FileQRCodeView: View {
             .background(Color(NSColor.controlBackgroundColor))
             .cornerRadius(6)
 
-            Text(qrHint(for: fileName, isImage: isImage))
+            Text(isImage
+                 ? "扫码即可直接查看图片"
+                 : "链接有效期 1 小时，扫码或复制链接即可下载")
                 .font(.subheadline)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
@@ -738,26 +707,6 @@ struct FileQRCodeView: View {
             qrImage = QRCodeGenerator.generate(from: shareURL)
         }
     }
-}
-
-// MARK: - QR hint helper
-
-private func qrHint(for fileName: String, isImage: Bool = false) -> String {
-    let ext = (fileName as NSString).pathExtension.lowercased()
-
-    if isImage || ["jpg", "jpeg", "png", "gif", "webp", "heic", "svg", "bmp", "tiff", "tif"].contains(ext) {
-        return "扫码即可在浏览器中直接查看图片"
-    }
-    if ["mp4", "mov", "avi", "mkv", "webm", "3gp"].contains(ext) {
-        return "扫码即可在浏览器中播放视频"
-    }
-    if ["txt", "md", "json", "xml", "csv", "log", "yaml", "yml", "html", "css", "js", "ts"].contains(ext) {
-        return "扫码即可在浏览器中查看文本内容"
-    }
-    if ["pdf"].contains(ext) {
-        return "扫码即可在浏览器中查看 PDF"
-    }
-    return "扫码即可获取文件下载链接"
 }
 
 // MARK: - Date Formatting

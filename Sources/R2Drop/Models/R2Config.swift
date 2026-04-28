@@ -7,17 +7,14 @@ struct R2Config: Codable {
     let accessKeyId: String
     let secretAccessKey: String
     let endpoint: String
-    /// Optional custom domain for public access (e.g., "r2drop.230032.xyz")
-    let customDomain: String?
 
     var region: String { "auto" }
 
-    init(accountId: String, bucket: String, accessKeyId: String, secretAccessKey: String, customDomain: String? = nil) {
+    init(accountId: String, bucket: String, accessKeyId: String, secretAccessKey: String) {
         self.accountId = accountId
         self.bucket = bucket
         self.accessKeyId = accessKeyId
         self.secretAccessKey = secretAccessKey
-        self.customDomain = customDomain
         self.endpoint = "https://\(accountId).r2.cloudflarestorage.com"
     }
 }

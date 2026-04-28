@@ -45,26 +45,6 @@ struct R2File: Identifiable, Hashable {
             return false
         }
     }
-
-    /// Check if this file is a text type (viewable in browser inline)
-    var isTextType: Bool {
-        switch fileExtension.lowercased() {
-        case "txt", "md", "json", "xml", "csv", "log", "yaml", "yml", "html", "css", "js", "ts", "py", "rb", "go", "rs", "swift", "c", "h", "cpp", "hpp", "java", "kt", "sh", "bash", "zsh", "env", "cfg", "ini", "toml", "plist", "strings":
-            return true
-        default:
-            return false
-        }
-    }
-
-    /// Check if this file is a video type
-    var isVideoType: Bool {
-        switch fileExtension.lowercased() {
-        case "mp4", "mov", "avi", "mkv", "webm", "3gp":
-            return true
-        default:
-            return false
-        }
-    }
 }
 
 /// Represents either a file or a directory in a folder listing
