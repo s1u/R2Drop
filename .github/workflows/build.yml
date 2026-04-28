@@ -21,7 +21,10 @@ jobs:
           echo "Build succeeded"
           exit 0
         fi
-        # Build failed - capture errors in summary
+        # Build failed - show errors in annotation
+        ERROR_LINES=$(grep -i "error:" /tmp/swift_build.log | head -5 | tr '\n' ' ')
+        echo "::error::$ERROR_LINES"
+        # Also write to summary
         {
           echo "## Build Errors"
           echo '```'
