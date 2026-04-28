@@ -574,9 +574,7 @@ struct QRCodePopoverView: View {
                 .cornerRadius(6)
             }
 
-            Text(isImageExtension(transfer.fileName)
-                 ? "扫码即可直接查看图片"
-                 : "链接有效期 1 小时，扫码或复制链接即可下载")
+            Text(qrHint(for: transfer.fileName))
                 .font(.subheadline)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
@@ -679,9 +677,7 @@ struct FileQRCodeView: View {
             .background(Color(NSColor.controlBackgroundColor))
             .cornerRadius(6)
 
-            Text(isImage
-                 ? "扫码即可直接查看图片"
-                 : "链接有效期 1 小时，扫码或复制链接即可下载")
+            Text(qrHint(for: fileName, isImage: isImage))
                 .font(.subheadline)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
@@ -707,6 +703,26 @@ struct FileQRCodeView: View {
             qrImage = QRCodeGenerator.generate(from: shareURL)
         }
     }
+}
+
+// MARK: - QR hint helper
+
+private func qrHint(for fileName: String, isImage: Bool = false) -> String {
+    let ext = (fileName as NSString).pathExtension.lowercased()
+
+    if isImage || ["jpg", "jpeg", "png", "gif", "webp", "heic", "svg", "bmp", "tiff", "tif"].contains(ext) {
+        return "扫码即可在浏览器中直接查看图片"
+    }
+    if ["mp4", "mov", "avi", "mkv", "webm", "3gp"].contains(ext) {
+        return "扫码即可在浏览器中播放视频"
+    }
+    if ["txt", "md", "json", "xml", "csv", "log", "yaml", "yml", "html", "css", "js", "ts"].contains(ext) {
+        return "扫码即可在浏览器中查看文本内容"
+    }
+    if ["pdf"].contains(ext) {
+        return "扫码即可在浏览器中查看 PDF"
+    }
+    return "扫码即可获取文件下载链接"
 }
 
 // MARK: - Date Formatting
