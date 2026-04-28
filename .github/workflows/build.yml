@@ -17,9 +17,13 @@ jobs:
     - name: Build
       run: |
         for i in 1 2 3; do
-          if swift build -c release 2>&1; then
+          SWIFT_OUT=$(swift build -c release 2>&1)
+          EXIT_CODE=$?
+          if [ $EXIT_CODE -eq 0 ]; then
             break
           fi
+          # Show last 50 lines of output for debugging
+          echo "$SWIFT_OUT" | tail -50
           if [ $i -eq 3 ]; then
             echo "Build failed after 3 attempts"
             exit 1
