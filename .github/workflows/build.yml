@@ -16,21 +16,20 @@ jobs:
     
     - name: Build
       run: |
-        for i in 1 2 3; do
-          SWIFT_OUT=$(swift build -c release 2>&1)
-          EXIT_CODE=$?
-          if [ $EXIT_CODE -eq 0 ]; then
-            break
-          fi
-          # Show last 50 lines of output for debugging
-          echo "$SWIFT_OUT" | tail -50
-          if [ $i -eq 3 ]; then
-            echo "Build failed after 3 attempts"
-            exit 1
-          fi
-          echo "Build attempt $i failed, retrying in 10s..."
-          sleep 10
-        done
+        echo "::group::Swift build output"
+        swift build -c release 2>&1 | tee /tmp/swift_build.log || true
+        echo "::endgroup::"
+        echo "::error::Build errors:"
+        grep -i "error:" /tmp/swift_build.log | head -30 || echo "No specific errors found"
+        # Check if build succeeded (last line of log should have no errors)
+        if grep -q "Build complete" /tmp/swift_build.log; then
+          echo "::notice::Build succeeded"
+          exit 0
+        fi
+        # Show warnings 
+        echo "::warning::Showing last 30 lines of build log"
+        tail -30 /tmp/swift_build.log
+        exit 1
       
     - name: Package DMG
       id: package
