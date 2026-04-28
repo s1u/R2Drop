@@ -16,6 +16,7 @@ jobs:
     
     - name: Build
       run: |
+        set -o pipefail
         if swift build -c release 2>&1 | tee /tmp/swift_build.log; then
           echo "Build succeeded"
           exit 0
