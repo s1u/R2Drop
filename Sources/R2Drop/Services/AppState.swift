@@ -349,7 +349,7 @@ final class AppState: ObservableObject {
             }
 
             // Download each file preserving folder structure
-            var downloadedBytes: Int64 = 0
+            let actor = DownloadedBytesActor()
             for file in allFiles {
                 // Compute relative path within the folder
                 var relativePath = file.key
@@ -366,28 +366,27 @@ final class AppState: ObservableObject {
                 )
 
                 try await r2Service.download(key: file.key, destination: destURL) { [progressId] pct in
-                    Task { @MainActor [weak self] in
-                        guard let self, let idx = self.transfers.firstIndex(where: { $0.id == progressId }) else { return }
+                    Task {
+                        let downloaded = await actor.value
                         let fileBytes = Int64(Double(file.size) * pct / 100.0)
-                        self.transfers[idx].bytesTransferred = downloadedBytes + fileBytes
+                        await MainActor.run { [weak self] in
+                            guard let self, let idx = self.transfers.firstIndex(where: { $0.id == progressId }) else { return }
+                            self.transfers[idx].bytesTransferred = downloaded + fileBytes
+                        }
                     }
                 }
-                downloadedBytes += file.size
+                await actor.add(file.size)
             }
 
-            // Create a zip archive
+            // Create a zip archive using ditto (no NSFileCoordinator API issues)
             let zipURL = FileHelper.uniqueDownloadURL(for: "\(folderName).zip")
-            let coordinator = NSFileCoordinator()
-            var zipError: NSError?
-            coordinator.coordinate(readingItemAt: tempDir, options: [.forUploading], error: &zipError) { zipTempURL in
-                if FileManager.default.fileExists(atPath: zipURL.path) {
-                    try? FileManager.default.removeItem(at: zipURL)
-                }
-                try? FileManager.default.moveItem(at: zipTempURL, to: zipURL)
-            }
-
-            if let error = zipError {
-                throw error
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+            process.arguments = ["-c", "-k", "--sequesterRsrc", "--keepParent", tempDir.path, zipURL.path]
+            try process.run()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0 else {
+                throw R2Error.unsupportedOperation("压缩文件夹失败")
             }
 
             // Clean up temp directory
@@ -449,5 +448,14 @@ final class AppState: ObservableObject {
     private func updateTransferStatus(id: UUID, status: TransferStatus) {
         guard let idx = transfers.firstIndex(where: { $0.id == id }) else { return }
         transfers[idx].status = status
+    }
+}
+
+/// Thread-safe counter for tracking downloaded bytes in folder download
+private actor DownloadedBytesActor {
+    var value: Int64 = 0
+
+    func add(_ bytes: Int64) {
+        value += bytes
     }
 }
